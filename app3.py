@@ -39,6 +39,7 @@ def fetch_market_orders(item_code, limit):
 # Carga de datos
 buy_orders, sell_orders = fetch_market_orders(item_code, limit)
 buy_df = pd.DataFrame(buy_orders)
+buy_df = buy_df[buy_df['price'] > 0.002]                    
 sell_df = pd.DataFrame(sell_orders)
 
 st.title(f"📈 Market Depth Chart for {item_code}")
