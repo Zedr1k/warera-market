@@ -41,6 +41,8 @@ buy_orders, sell_orders = fetch_market_orders(item_code, limit)
 buy_df = pd.DataFrame(buy_orders)
 sell_df = pd.DataFrame(sell_orders)
 
+st.title(f"📈 Market Depth Chart for {item_code}")
+                    
 if not buy_df.empty or not sell_df.empty:
     # Métricas principales
     total_buy_cost = (sell_df['quantity'] * sell_df['price']).sum()
