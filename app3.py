@@ -128,8 +128,33 @@ limit = st.sidebar.slider("Order Limit", min_value=1, max_value=50, value=10)
 
 # Sección de ROI en la barra lateral
 st.sidebar.title("📊 ROI Calculator")
-cost_per_pp = st.sidebar.number_input("Costo por PP", min_value=0.001, max_value=1.0, value=0.064, step=0.001)
-production_bonus = st.sidebar.slider("Bonus de Producción (%)", min_value=0, max_value=100, value=27) / 100
+
+# Solución para el problema de precisión con number_input
+cost_per_pp_default = 0.064
+cost_per_pp_str = st.sidebar.text_input(
+    "Costo por PP (ej: 0.064)", 
+    value=str(cost_per_pp_default),
+    help="Ingrese el costo por punto de producción con hasta 6 decimales"
+)
+
+try:
+    cost_per_pp = float(cost_per_pp_str)
+    if cost_per_pp <= 0 or cost_per_pp > 1:
+        st.sidebar.error("El costo por PP debe ser mayor que 0 y menor o igual a 1")
+        cost_per_pp = cost_per_pp_default
+except ValueError:
+    st.sidebar.error("Por favor ingrese un número válido")
+    cost_per_pp = cost_per_pp_default
+
+# Usamos un slider para el bonus pero con formato personalizado
+production_bonus_percent = st.sidebar.slider(
+    "Bonus de Producción (%)", 
+    min_value=0, 
+    max_value=200, 
+    value=27,
+    help="Porcentaje de bonus de producción (0-200%)"
+)
+production_bonus = production_bonus_percent / 100
 
 # Cálculo de ROI
 roi_data = calculate_roi(cost_per_pp, production_bonus)
@@ -223,6 +248,9 @@ with tab1:
 with tab2:
     st.title("📊 ROI Analysis")
     
+    # Mostrar los valores actuales de configuración
+    st.sidebar.info(f"Configuración actual: Costo PP = {cost_per_pp:.6f}, Bonus = {production_bonus_percent}%")
+    
     if roi_data:
         # Crear DataFrame con los resultados
         roi_df = pd.DataFrame(roi_data)
@@ -243,13 +271,16 @@ with tab2:
         
         # Mostrar tabla de ROI
         st.subheader("ROI por Recurso")
+        
+        # Formatear la tabla para mejor visualización
+        display_df = roi_df.copy()
+        display_df['market_price'] = display_df['market_price'].apply(lambda x: f"{x:.4f}")
+        display_df['production_cost'] = display_df['production_cost'].apply(lambda x: f"{x:.6f}")
+        display_df['profit_per_unit'] = display_df['profit_per_unit'].apply(lambda x: f"{x:.6f}")
+        display_df['roi'] = display_df['roi'].apply(lambda x: f"{x:.2f}%")
+        
         st.dataframe(
-            roi_df.style.format({
-                'market_price': '{:.4f}',
-                'production_cost': '{:.4f}',
-                'profit_per_unit': '{:.4f}',
-                'roi': '{:.2f}%'
-            }),
+            display_df,
             use_container_width=True
         )
         
@@ -275,8 +306,8 @@ with tab2:
         for _, row in top_5.iterrows():
             with st.expander(f"{row['resource']} - ROI: {row['roi']:.2f}%"):
                 st.write(f"**Precio de mercado:** ${row['market_price']:.4f}")
-                st.write(f"**Costo de producción:** ${row['production_cost']:.4f}")
-                st.write(f"**Beneficio por unidad:** ${row['profit_per_unit']:.4f}")
+                st.write(f"**Costo de producción:** ${row['production_cost']:.6f}")
+                st.write(f"**Beneficio por unidad:** ${row['profit_per_unit']:.6f}")
                 st.write(f"**ROI:** {row['roi']:.2f}%")
     else:
         st.warning("No se pudo calcular el ROI. Verifique la conexión a internet.")
