@@ -55,6 +55,7 @@ def get_user_companies(user_id):
     """Obtiene las empresas de un usuario"""
     try:
         url = COMPANIES_URL.format(user_id=user_id)
+        print(url)
         response = requests.get(url)
         data = response.json()
         return data[0]['result']['data']['items']
@@ -494,3 +495,4 @@ with tab3:
             st.warning("No se pudieron analizar las empresas. Verifique el User ID y la conexión a internet.")
     else:
         st.info("Ingrese un User ID y haga clic en 'Analizar Empresas' para comenzar el análisis.")
+
