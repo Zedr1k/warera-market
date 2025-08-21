@@ -5,15 +5,27 @@ import requests
 import plotly.graph_objects as go
 from datetime import datetime
 import json
+import urllib.parse
 
 # Configuración de la página
 st.set_page_config(page_title="WarEra Market Dashboard", layout="wide")
 
-# URL de la API
+# URLs de la API
 API_URL = "https://api2.warera.io/trpc/tradingOrder.getTopOrders"
-PRICES_URL = 'https://api2.warera.io/trpc/itemTrading.getPrices?batch=1&input={"0":{"limit":100}}'
-COMPANIES_URL = 'https://api2.warera.io/trpc/company.getCompanies?batch=1&input={"0":{"userId":"{user_id}"}}'
-COMPANY_DETAILS_URL = 'https://api2.warera.io/trpc/company.getById?batch=1&input={"0":{"companyId":"{company_id}"}}'
+PRICES_URL = "https://api2.warera.io/trpc/itemTrading.getPrices?batch=1&input=%7B%220%22%3A%7B%22limit%22%3A100%7D%7D"
+
+# URLs para empresas
+def get_companies_url(user_id):
+    """Genera la URL para obtener empresas de un usuario"""
+    input_json = json.dumps({"0": {"userId": user_id}})
+    encoded_input = urllib.parse.quote(input_json)
+    return f"https://api2.warera.io/trpc/company.getCompanies?batch=1&input={encoded_input}"
+
+def get_company_details_url(company_id):
+    """Genera la URL para obtener detalles de una empresa"""
+    input_json = json.dumps({"0": {"companyId": company_id}})
+    encoded_input = urllib.parse.quote(input_json)
+    return f"https://api2.warera.io/trpc/company.getById?batch=1&input={encoded_input}"
 
 # Datos de producción (recetas)
 PRODUCTION_DATA = {
@@ -37,6 +49,9 @@ PRODUCTION_DATA = {
     "petroleum": {"ingredients": {}, "pp": 1}
 }
 
+# Lista de materias primas (recursos sin ingredientes)
+RAW_MATERIALS = [resource for resource, data in PRODUCTION_DATA.items() if not data.get('ingredients')]
+
 # Función para obtener precios de mercado
 @st.cache_data
 def get_market_prices():
@@ -45,8 +60,8 @@ def get_market_prices():
         response = requests.get(PRICES_URL)
         data = response.json()
         return data[0]['result']['data']
-    except:
-        st.error("Error obteniendo precios de mercado")
+    except Exception as e:
+        st.error(f"Error obteniendo precios de mercado: {str(e)}")
         return {}
 
 # Función para obtener empresas de un usuario
@@ -54,13 +69,17 @@ def get_market_prices():
 def get_user_companies(user_id):
     """Obtiene las empresas de un usuario"""
     try:
-        url = COMPANIES_URL.format(user_id=user_id)
-        print(url)
+        url = get_companies_url(user_id)
         response = requests.get(url)
+        
+        if response.status_code != 200:
+            st.error(f"Error en la respuesta HTTP: {response.status_code}")
+            return []
+            
         data = response.json()
         return data[0]['result']['data']['items']
-    except:
-        st.error("Error obteniendo empresas del usuario")
+    except Exception as e:
+        st.error(f"Error obteniendo empresas del usuario: {str(e)}")
         return []
 
 # Función para obtener detalles de una empresa
@@ -68,17 +87,22 @@ def get_user_companies(user_id):
 def get_company_details(company_id):
     """Obtiene los detalles de una empresa específica"""
     try:
-        url = COMPANY_DETAILS_URL.format(company_id=company_id)
+        url = get_company_details_url(company_id)
         response = requests.get(url)
+        
+        if response.status_code != 200:
+            st.error(f"Error en la respuesta HTTP: {response.status_code}")
+            return None
+            
         data = response.json()
         return data[0]['result']['data']
-    except:
-        st.error(f"Error obteniendo detalles de la empresa {company_id}")
+    except Exception as e:
+        st.error(f"Error obteniendo detalles de la empresa {company_id}: {str(e)}")
         return None
 
-# Función para calcular costos de producción
-def calculate_production_cost(resource, cost_per_pp, production_bonus, cache=None):
-    """Calcula recursivamente el costo de producción de un recurso con bonus"""
+# Función para calcular costos de producción usando precios de mercado para materias primas
+def calculate_production_cost_with_market(resource, cost_per_pp, production_bonus, market_prices, cache=None):
+    """Calcula recursivamente el costo de producción de un recurso con bonus y precios de mercado para materias primas"""
     if cache is None:
         cache = {}
     
@@ -92,43 +116,107 @@ def calculate_production_cost(resource, cost_per_pp, production_bonus, cache=Non
     total_cost = effective_pp * cost_per_pp
     
     for ingredient, quantity in recipe["ingredients"].items():
-        ingredient_cost = calculate_production_cost(ingredient, cost_per_pp, production_bonus, cache)
+        # Usar precio de mercado para materias primas
+        if ingredient in market_prices:
+            ingredient_cost = market_prices[ingredient]
+        else:
+            # Si no hay precio de mercado, calcular recursivamente
+            ingredient_cost = calculate_production_cost_with_market(ingredient, cost_per_pp, production_bonus, market_prices, cache)
+        
         total_cost += quantity * ingredient_cost
     
     cache[resource] = total_cost
     return total_cost
 
-# Función para calcular ROI
-def calculate_roi(cost_per_pp, production_bonus):
-    """Calcula el ROI para todos los recursos considerando el bonus de producción"""
+# Función para calcular el máximo costo por PP que mantiene ganancias
+def calculate_max_pp_cost(resource, production_bonus, market_prices, use_deposit_bonus=False):
+    """Calcula el máximo costo por PP que mantiene ganancias para un recurso"""
+    if resource not in PRODUCTION_DATA or resource not in market_prices:
+        return None
+    
+    market_price = market_prices[resource]
+    recipe = PRODUCTION_DATA[resource]
+    
+    # Ajustar bonus para materias primas si se usa el bonus de depósito
+    effective_bonus = production_bonus
+    if use_deposit_bonus and resource in RAW_MATERIALS:
+        effective_bonus += 0.3
+    
+    # Calcular PP efectivo considerando el bonus
+    effective_pp = recipe["pp"] / (1 + effective_bonus)
+    
+    # Calcular el costo de los ingredientes usando precios de mercado
+    ingredient_cost = 0
+    for ingredient, quantity in recipe.get("ingredients", {}).items():
+        if ingredient in market_prices:
+            ingredient_cost += quantity * market_prices[ingredient]
+        else:
+            # Si no hay precio de mercado, no podemos calcular
+            return None
+    
+    # Calcular el máximo costo por PP que mantiene ganancias
+    # production_cost = effective_pp * cost_per_pp + ingredient_cost <= market_price
+    # => cost_per_pp <= (market_price - ingredient_cost) / effective_pp
+    if market_price <= ingredient_cost:
+        return 0  # No es rentable incluso con PP gratis
+    
+    max_cost_per_pp = (market_price - ingredient_cost) / effective_pp
+    return max_cost_per_pp
+
+# Función para analizar empleados con costos reales
+def analyze_employees_with_real_costs(user_id, production_bonus):
+    """Analiza la rentabilidad de cada empleado individualmente usando su salario como costo por PP"""
+    companies = get_user_companies(user_id)
     market_prices = get_market_prices()
     
-    if not market_prices:
-        st.error("No se pudieron obtener los precios de mercado")
+    if not companies or not market_prices:
         return []
     
-    results = []
-    cache = {}
+    employees_analysis = []
     
-    for resource, market_price in market_prices.items():
-        if resource not in PRODUCTION_DATA:
+    for company_id in companies:
+        company = get_company_details(company_id)
+        if not company:
             continue
             
-        try:
-            production_cost = calculate_production_cost(resource, cost_per_pp, production_bonus, cache)
-            profit = market_price - production_cost
-            roi = (profit / production_cost) * 100 if production_cost > 0 else float('inf')
-            results.append({
-                "resource": resource,
-                "market_price": market_price,
-                "production_cost": production_cost,
-                "profit_per_unit": profit,
-                "roi": roi
-            })
-        except KeyError:
+        resource = company.get('itemCode')
+        if resource not in PRODUCTION_DATA:
             continue
+        
+        # Obtener precio de mercado del recurso
+        market_price = market_prices.get(resource, 0)
+        
+        # Analizar cada empleado
+        workers = company.get('workers', [])
+        for worker in workers:
+            wage = worker.get('wage', 0)
+            worker_id = worker.get('user', '')
+            
+            # Calcular costo de producción usando el salario del empleado como costo por PP
+            production_cost = calculate_production_cost_with_market(resource, wage, production_bonus, market_prices)
+            
+            # Calcular ganancia por unidad
+            profit_per_unit = market_price - production_cost
+            
+            # Calcular porcentaje de ganancia
+            profit_percentage = (profit_per_unit / production_cost) * 100 if production_cost > 0 else float('inf')
+            
+            # Determinar si es rentable
+            is_profitable = profit_per_unit > 0
+            
+            employees_analysis.append({
+                "company_name": company.get('name', 'Unknown'),
+                "resource": resource,
+                "worker_id": worker_id,
+                "wage": wage,
+                "production_cost": production_cost,
+                "market_price": market_price,
+                "profit_per_unit": profit_per_unit,
+                "profit_percentage": profit_percentage,
+                "is_profitable": is_profitable
+            })
     
-    return results
+    return employees_analysis
 
 # Función para obtener órdenes de mercado
 @st.cache_data
@@ -146,55 +234,36 @@ def fetch_market_orders(item_code, limit):
         st.error(f"❌ Error fetching market data: {e}")
         return [], []
 
-# Función para analizar empresas del usuario
-def analyze_companies(user_id, cost_per_pp, production_bonus):
-    """Analiza las empresas de un usuario para determinar rentabilidad"""
-    companies = get_user_companies(user_id)
+# Función para calcular máximos costos por PP para todos los recursos
+def calculate_max_pp_costs(production_bonus):
+    """Calcula el máximo costo por PP para todos los recursos"""
     market_prices = get_market_prices()
     
-    if not companies or not market_prices:
+    if not market_prices:
         return []
     
     results = []
     
-    for company_id in companies:
-        company = get_company_details(company_id)
-        if not company:
+    for resource in PRODUCTION_DATA:
+        if resource not in market_prices:
             continue
             
-        resource = company.get('itemCode')
-        if resource not in PRODUCTION_DATA:
-            continue
-            
-        # Calcular costo de producción
-        production_cost = calculate_production_cost(resource, cost_per_pp, production_bonus)
-        market_price = market_prices.get(resource, 0)
-        profit_per_unit = market_price - production_cost
+        market_price = market_prices[resource]
         
-        # Analizar trabajadores
-        workers = company.get('workers', [])
-        total_wage = sum(worker.get('wage', 0) for worker in workers)
-        avg_wage = total_wage / len(workers) if workers else 0
-        wage_status = "Below" if avg_wage < cost_per_pp else "Above"
+        # Calcular máximo costo por PP sin bonus de depósito
+        max_cost_no_deposit = calculate_max_pp_cost(resource, production_bonus, market_prices, False)
         
-        # Calcular rentabilidad
-        is_profitable = profit_per_unit > 0
-        profit_margin = (profit_per_unit / market_price) * 100 if market_price > 0 else 0
+        # Calcular máximo costo por PP con bonus de depósito (solo para materias primas)
+        max_cost_with_deposit = None
+        if resource in RAW_MATERIALS:
+            max_cost_with_deposit = calculate_max_pp_cost(resource, production_bonus, market_prices, True)
         
         results.append({
-            "company_id": company_id,
-            "name": company.get('name', 'Unknown'),
             "resource": resource,
-            "production": company.get('production', 0),
-            "worker_count": len(workers),
-            "avg_wage": avg_wage,
-            "cost_per_pp": cost_per_pp,
-            "wage_status": wage_status,
-            "production_cost": production_cost,
             "market_price": market_price,
-            "profit_per_unit": profit_per_unit,
-            "profit_margin": profit_margin,
-            "is_profitable": is_profitable
+            "max_cost_no_deposit": max_cost_no_deposit,
+            "max_cost_with_deposit": max_cost_with_deposit,
+            "is_raw_material": resource in RAW_MATERIALS
         })
     
     return results
@@ -208,25 +277,13 @@ item_options = [
 item_code = st.sidebar.selectbox("Item Code", options=item_options, index=0)
 limit = st.sidebar.slider("Order Limit", min_value=1, max_value=50, value=10)
 
-# Sección de ROI en la barra lateral
-st.sidebar.title("📊 ROI Calculator")
-
-# Solución para el problema de precisión con number_input
-cost_per_pp_default = 0.064
-cost_per_pp_str = st.sidebar.text_input(
-    "Costo por PP (ej: 0.064)", 
-    value=str(cost_per_pp_default),
-    help="Ingrese el costo por punto de producción con hasta 6 decimales"
+# Sección de análisis de empleados
+st.sidebar.title("👥 Employee Analysis")
+user_id = st.sidebar.text_input(
+    "User ID", 
+    value="68196d35dc610e77402347fa",
+    help="Ingrese el ID del usuario para analizar sus empleados"
 )
-
-try:
-    cost_per_pp = float(cost_per_pp_str)
-    if cost_per_pp <= 0 or cost_per_pp > 1:
-        st.sidebar.error("El costo por PP debe ser mayor que 0 y menor o igual a 1")
-        cost_per_pp = cost_per_pp_default
-except ValueError:
-    st.sidebar.error("Por favor ingrese un número válido")
-    cost_per_pp = cost_per_pp_default
 
 # Usamos un slider para el bonus pero con formato personalizado
 production_bonus_percent = st.sidebar.slider(
@@ -238,22 +295,14 @@ production_bonus_percent = st.sidebar.slider(
 )
 production_bonus = production_bonus_percent / 100
 
-# Sección para análisis de empresas
-st.sidebar.title("🏢 Company Analysis")
-user_id = st.sidebar.text_input(
-    "User ID", 
-    value="68196d35dc610e77402347fa",
-    help="Ingrese el ID del usuario para analizar sus empresas"
-)
+# Análisis de empleados
+analyze_employees_flag = st.sidebar.button("Analizar Empleados")
 
-# Cálculo de ROI
-roi_data = calculate_roi(cost_per_pp, production_bonus)
-
-# Análisis de empresas (solo si se solicita)
-analyze_companies_flag = st.sidebar.button("Analizar Empresas")
+# Análisis de máximos costos por PP
+analyze_max_costs_flag = st.sidebar.button("Calcular Máximos Costos PP")
 
 # Pestañas para la visualización
-tab1, tab2, tab3 = st.tabs(["📈 Market Depth", "📊 ROI Analysis", "🏢 Company Analysis"])
+tab1, tab2, tab3 = st.tabs(["📈 Market Depth", "👥 Employee Analysis", "💰 Max PP Cost Analysis"])
 
 with tab1:
     st.title(f"📈 Market Depth Chart for {item_code}")
@@ -339,160 +388,190 @@ with tab1:
         st.warning("No buy or sell orders available for este item.")
 
 with tab2:
-    st.title("📊 ROI Analysis")
+    st.title("👥 Employee Profitability Analysis")
     
-    # Mostrar los valores actuales de configuración
-    st.sidebar.info(f"Configuración actual: Costo PP = {cost_per_pp:.6f}, Bonus = {production_bonus_percent}%")
-    
-    if roi_data:
-        # Crear DataFrame con los resultados
-        roi_df = pd.DataFrame(roi_data)
-        roi_df = roi_df.sort_values('roi', ascending=False)
+    if analyze_employees_flag:
+        with st.spinner("Analizando empleados..."):
+            employees_data = analyze_employees_with_real_costs(user_id, production_bonus)
         
-        # Mostrar métricas principales
-        best_roi = roi_df.iloc[0]
-        worst_roi = roi_df.iloc[-1]
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Mejor ROI", f"{best_roi['roi']:.2f}%", best_roi['resource'])
-        with col2:
-            st.metric("Peor ROI", f"{worst_roi['roi']:.2f}%", worst_roi['resource'])
-        with col3:
-            profitable = len(roi_df[roi_df['roi'] > 0])
-            st.metric("Recursos Rentables", f"{profitable}/{len(roi_df)}")
-        
-        # Mostrar tabla de ROI
-        st.subheader("ROI por Recurso")
-        
-        # Formatear la tabla para mejor visualización
-        display_df = roi_df.copy()
-        display_df['market_price'] = display_df['market_price'].apply(lambda x: f"{x:.4f}")
-        display_df['production_cost'] = display_df['production_cost'].apply(lambda x: f"{x:.6f}")
-        display_df['profit_per_unit'] = display_df['profit_per_unit'].apply(lambda x: f"{x:.6f}")
-        display_df['roi'] = display_df['roi'].apply(lambda x: f"{x:.2f}%")
-        
-        st.dataframe(
-            display_df,
-            use_container_width=True
-        )
-        
-        # Gráfico de barras de ROI
-        fig_roi = go.Figure()
-        fig_roi.add_trace(go.Bar(
-            x=roi_df['resource'],
-            y=roi_df['roi'],
-            marker_color=['green' if roi > 0 else 'red' for roi in roi_df['roi']]
-        ))
-        fig_roi.update_layout(
-            title='ROI por Recurso',
-            xaxis_title='Recurso',
-            yaxis_title='ROI (%)',
-            xaxis_tickangle=-45,
-            height=500
-        )
-        st.plotly_chart(fig_roi, use_container_width=True)
-        
-        # Mostrar detalles de los 5 mejores recursos
-        st.subheader("Top 5 Recursos por ROI")
-        top_5 = roi_df.head()
-        for _, row in top_5.iterrows():
-            with st.expander(f"{row['resource']} - ROI: {row['roi']:.2f}%"):
-                st.write(f"**Precio de mercado:** ${row['market_price']:.4f}")
-                st.write(f"**Costo de producción:** ${row['production_cost']:.6f}")
-                st.write(f"**Beneficio por unidad:** ${row['profit_per_unit']:.6f}")
-                st.write(f"**ROI:** {row['roi']:.2f}%")
-    else:
-        st.warning("No se pudo calcular el ROI. Verifique la conexión a internet.")
-
-with tab3:
-    st.title("🏢 Company Analysis")
-    
-    if analyze_companies_flag:
-        with st.spinner("Analizando empresas..."):
-            companies_data = analyze_companies(user_id, cost_per_pp, production_bonus)
-        
-        if companies_data:
+        if employees_data:
             # Crear DataFrame con los resultados
-            companies_df = pd.DataFrame(companies_data)
+            employees_df = pd.DataFrame(employees_data)
+            
+            # Ordenar por porcentaje de ganancia (descendente)
+            employees_df = employees_df.sort_values('profit_percentage', ascending=False)
             
             # Mostrar métricas generales
-            profitable_companies = len(companies_df[companies_df['is_profitable']])
-            below_cost_companies = len(companies_df[companies_df['wage_status'] == 'Below'])
+            profitable_employees = len(employees_df[employees_df['is_profitable']])
+            total_employees = len(employees_df)
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Empresas Rentables", f"{profitable_companies}/{len(companies_df)}")
+                st.metric("Empleados Rentables", f"{profitable_employees}/{total_employees}")
             with col2:
-                st.metric("Salarios por Debajo", f"{below_cost_companies}/{len(companies_df)}")
+                avg_profit_percentage = employees_df['profit_percentage'].mean()
+                st.metric("Ganancia Promedio", f"{avg_profit_percentage:.2f}%")
             with col3:
-                avg_margin = companies_df['profit_margin'].mean()
-                st.metric("Margen Promedio", f"{avg_margin:.2f}%")
+                total_profit = employees_df['profit_per_unit'].sum()
+                st.metric("Ganancia Total", f"${total_profit:.2f}")
             
-            # Mostrar tabla de empresas
-            st.subheader("Análisis de Empresas")
+            # Mostrar tabla de empleados
+            st.subheader("Análisis de Rentabilidad por Empleado")
             
             # Formatear la tabla para mejor visualización
-            display_companies_df = companies_df.copy()
-            display_companies_df['avg_wage'] = display_companies_df['avg_wage'].apply(lambda x: f"{x:.6f}")
-            display_companies_df['production_cost'] = display_companies_df['production_cost'].apply(lambda x: f"{x:.6f}")
-            display_companies_df['market_price'] = display_companies_df['market_price'].apply(lambda x: f"{x:.4f}")
-            display_companies_df['profit_per_unit'] = display_companies_df['profit_per_unit'].apply(lambda x: f"{x:.6f}")
-            display_companies_df['profit_margin'] = display_companies_df['profit_margin'].apply(lambda x: f"{x:.2f}%")
+            display_employees_df = employees_df.copy()
+            display_employees_df['wage'] = display_employees_df['wage'].apply(lambda x: f"{x:.6f}")
+            display_employees_df['production_cost'] = display_employees_df['production_cost'].apply(lambda x: f"{x:.6f}")
+            display_employees_df['market_price'] = display_employees_df['market_price'].apply(lambda x: f"{x:.4f}")
+            display_employees_df['profit_per_unit'] = display_employees_df['profit_per_unit'].apply(lambda x: f"{x:.6f}")
+            display_employees_df['profit_percentage'] = display_employees_df['profit_percentage'].apply(lambda x: f"{x:.2f}%")
             
             # Reordenar columnas
-            display_companies_df = display_companies_df[[
-                'name', 'resource', 'worker_count', 'avg_wage', 'wage_status',
-                'production_cost', 'market_price', 'profit_per_unit', 'profit_margin', 'is_profitable'
+            display_employees_df = display_employees_df[[
+                'company_name', 'resource', 'worker_id', 'wage', 'production_cost',
+                'market_price', 'profit_per_unit', 'profit_percentage', 'is_profitable'
             ]]
             
             st.dataframe(
-                display_companies_df,
+                display_employees_df,
                 use_container_width=True
             )
             
-            # Gráfico de rentabilidad
-            fig_companies = go.Figure()
-            fig_companies.add_trace(go.Bar(
-                x=companies_df['name'],
-                y=companies_df['profit_margin'],
-                marker_color=['green' if profitable else 'red' for profitable in companies_df['is_profitable']],
-                text=companies_df['resource'],
+            # Gráfico de rentabilidad por empleado
+            fig_employees = go.Figure()
+            fig_employees.add_trace(go.Bar(
+                x=employees_df['worker_id'],
+                y=employees_df['profit_percentage'],
+                marker_color=['green' if profit > 0 else 'red' for profit in employees_df['profit_per_unit']],
+                text=employees_df['company_name'],
                 textposition='auto'
             ))
-            fig_companies.update_layout(
-                title='Margen de Beneficio por Empresa',
-                xaxis_title='Empresa',
-                yaxis_title='Margen de Beneficio (%)',
+            fig_employees.update_layout(
+                title='Rentabilidad por Empleado (%)',
+                xaxis_title='Empleado ID',
+                yaxis_title='Porcentaje de Ganancia (%)',
                 xaxis_tickangle=-45,
                 height=500
             )
-            st.plotly_chart(fig_companies, use_container_width=True)
+            st.plotly_chart(fig_employees, use_container_width=True)
             
-            # Mostrar detalles de empresas problemáticas
-            st.subheader("Empresas con Posibles Problemas")
+            # Mostrar detalles de los mejores y peores empleados
+            st.subheader("Top 5 Empleados Más Rentables")
+            top_5 = employees_df.head()
+            for _, employee in top_5.iterrows():
+                with st.expander(f"Empleado {employee['worker_id']} - {employee['profit_percentage']:.2f}%"):
+                    st.write(f"**Empresa:** {employee['company_name']}")
+                    st.write(f"**Recurso:** {employee['resource']}")
+                    st.write(f"**Salario:** ${employee['wage']:.6f} por PP")
+                    st.write(f"**Costo de producción:** ${employee['production_cost']:.6f}")
+                    st.write(f"**Precio de mercado:** ${employee['market_price']:.4f}")
+                    st.write(f"**Ganancia por unidad:** ${employee['profit_per_unit']:.6f}")
+                    st.write(f"**Porcentaje de ganancia:** {employee['profit_percentage']:.2f}%")
             
-            # Empresas no rentables
-            unprofitable = companies_df[~companies_df['is_profitable']]
-            if not unprofitable.empty:
-                st.warning(f"{len(unprofitable)} empresas no son rentables")
-                for _, company in unprofitable.iterrows():
-                    with st.expander(f"{company['name']} - {company['resource']}"):
-                        st.write(f"**Costo de producción:** ${company['production_cost']:.6f}")
-                        st.write(f"**Precio de mercado:** ${company['market_price']:.4f}")
-                        st.write(f"**Pérdida por unidad:** ${-company['profit_per_unit']:.6f}")
-            
-            # Empresas con salarios por encima del costo
-            high_wage = companies_df[companies_df['wage_status'] == 'Above']
-            if not high_wage.empty:
-                st.info(f"{len(high_wage)} empresas con salarios por encima del costo de referencia")
-                for _, company in high_wage.iterrows():
-                    with st.expander(f"{company['name']} - Salario: {company['avg_wage']:.6f}"):
-                        st.write(f"**Salario promedio:** ${company['avg_wage']:.6f}")
-                        st.write(f"**Costo de referencia:** ${company['cost_per_pp']:.6f}")
-                        st.write(f"**Diferencia:** ${company['avg_wage'] - company['cost_per_pp']:.6f}")
+            st.subheader("Top 5 Empleados Menos Rentables")
+            bottom_5 = employees_df.tail()
+            for _, employee in bottom_5.iterrows():
+                with st.expander(f"Empleado {employee['worker_id']} - {employee['profit_percentage']:.2f}%"):
+                    st.write(f"**Empresa:** {employee['company_name']}")
+                    st.write(f"**Recurso:** {employee['resource']}")
+                    st.write(f"**Salario:** ${employee['wage']:.6f} por PP")
+                    st.write(f"**Costo de producción:** ${employee['production_cost']:.6f}")
+                    st.write(f"**Precio de mercado:** ${employee['market_price']:.4f}")
+                    st.write(f"**Ganancia por unidad:** ${employee['profit_per_unit']:.6f}")
+                    st.write(f"**Porcentaje de ganancia:** {employee['profit_percentage']:.2f}%")
         else:
-            st.warning("No se pudieron analizar las empresas. Verifique el User ID y la conexión a internet.")
+            st.warning("No se pudieron analizar los empleados. Verifique el User ID y la conexión a internet.")
     else:
-        st.info("Ingrese un User ID y haga clic en 'Analizar Empresas' para comenzar el análisis.")
+        st.info("Ingrese un User ID y haga clic en 'Analizar Empleados' para comenzar el análisis.")
 
+with tab3:
+    st.title("💰 Maximum PP Cost Analysis")
+    
+    if analyze_max_costs_flag:
+        with st.spinner("Calculando máximos costos por PP..."):
+            max_costs_data = calculate_max_pp_costs(production_bonus)
+        
+        if max_costs_data:
+            # Crear DataFrame con los resultados
+            max_costs_df = pd.DataFrame(max_costs_data)
+            
+            # Ordenar por máximo costo por PP (descendente)
+            max_costs_df = max_costs_df.sort_values('max_cost_no_deposit', ascending=False)
+            
+            # Mostrar métricas generales
+            profitable_resources = len(max_costs_df[max_costs_df['max_cost_no_deposit'] > 0])
+            total_resources = len(max_costs_df)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Recursos Rentables", f"{profitable_resources}/{total_resources}")
+            with col2:
+                avg_max_cost = max_costs_df['max_cost_no_deposit'].mean()
+                st.metric("Costo PP Promedio", f"${avg_max_cost:.6f}")
+            with col3:
+                raw_materials_count = len(max_costs_df[max_costs_df['is_raw_material']])
+                st.metric("Materias Primas", f"{raw_materials_count}/{total_resources}")
+            
+            # Mostrar tabla de máximos costos
+            st.subheader("Máximo Costo por PP para Mantener Ganancia")
+            
+            # Formatear la tabla para mejor visualización
+            display_max_costs_df = max_costs_df.copy()
+            display_max_costs_df['market_price'] = display_max_costs_df['market_price'].apply(lambda x: f"{x:.4f}")
+            display_max_costs_df['max_cost_no_deposit'] = display_max_costs_df['max_cost_no_deposit'].apply(lambda x: f"{x:.6f}" if x is not None else "N/A")
+            display_max_costs_df['max_cost_with_deposit'] = display_max_costs_df['max_cost_with_deposit'].apply(lambda x: f"{x:.6f}" if x is not None else "N/A")
+            
+            # Reordenar columnas
+            display_max_costs_df = display_max_costs_df[[
+                'resource', 'is_raw_material', 'market_price', 
+                'max_cost_no_deposit', 'max_cost_with_deposit'
+            ]]
+            
+            st.dataframe(
+                display_max_costs_df,
+                use_container_width=True
+            )
+            
+            # Gráfico de máximos costos por PP
+            fig_max_costs = go.Figure()
+            fig_max_costs.add_trace(go.Bar(
+                x=max_costs_df['resource'],
+                y=max_costs_df['max_cost_no_deposit'],
+                name='Sin Bonus Depósito',
+                marker_color='blue'
+            ))
+            
+            # Agregar barras para materias primas con bonus de depósito
+            raw_materials_df = max_costs_df[max_costs_df['is_raw_material'] & max_costs_df['max_cost_with_deposit'].notnull()]
+            if not raw_materials_df.empty:
+                fig_max_costs.add_trace(go.Bar(
+                    x=raw_materials_df['resource'],
+                    y=raw_materials_df['max_cost_with_deposit'],
+                    name='Con Bonus Depósito (30%)',
+                    marker_color='orange'
+                ))
+            
+            fig_max_costs.update_layout(
+                title='Máximo Costo por PP por Recurso',
+                xaxis_title='Recurso',
+                yaxis_title='Máximo Costo por PP',
+                xaxis_tickangle=-45,
+                height=500,
+                barmode='group'
+            )
+            st.plotly_chart(fig_max_costs, use_container_width=True)
+            
+            # Mostrar detalles de los recursos más rentables
+            st.subheader("Top 5 Recursos Más Rentables")
+            top_5 = max_costs_df.head()
+            for _, resource in top_5.iterrows():
+                with st.expander(f"{resource['resource']} - Máximo PP: ${resource['max_cost_no_deposit']:.6f}"):
+                    st.write(f"**Precio de mercado:** ${resource['market_price']:.4f}")
+                    st.write(f"**Máximo costo por PP:** ${resource['max_cost_no_deposit']:.6f}")
+                    if resource['is_raw_material'] and resource['max_cost_with_deposit'] is not None:
+                        st.write(f"**Máximo costo con depósito (30%):** ${resource['max_cost_with_deposit']:.6f}")
+                    st.write(f"**Es materia prima:** {'Sí' if resource['is_raw_material'] else 'No'}")
+        else:
+            st.warning("No se pudieron calcular los máximos costos. Verifique la conexión a internet.")
+    else:
+        st.info("Haga clic en 'Calcular Máximos Costos PP' para analizar los costos máximos por PP.")
