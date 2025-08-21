@@ -12,6 +12,8 @@ st.set_page_config(page_title="WarEra Market Dashboard", layout="wide")
 # URL de la API
 API_URL = "https://api2.warera.io/trpc/tradingOrder.getTopOrders"
 PRICES_URL = 'https://api2.warera.io/trpc/itemTrading.getPrices?batch=1&input={"0":{"limit":100}}'
+COMPANIES_URL = 'https://api2.warera.io/trpc/company.getCompanies?batch=1&input={"0":{"userId":"{user_id}"}}'
+COMPANY_DETAILS_URL = 'https://api2.warera.io/trpc/company.getById?batch=1&input={"0":{"companyId":"{company_id}"}}'
 
 # Datos de producción (recetas)
 PRODUCTION_DATA = {
@@ -46,6 +48,32 @@ def get_market_prices():
     except:
         st.error("Error obteniendo precios de mercado")
         return {}
+
+# Función para obtener empresas de un usuario
+@st.cache_data
+def get_user_companies(user_id):
+    """Obtiene las empresas de un usuario"""
+    try:
+        url = COMPANIES_URL.format(user_id=user_id)
+        response = requests.get(url)
+        data = response.json()
+        return data[0]['result']['data']['items']
+    except:
+        st.error("Error obteniendo empresas del usuario")
+        return []
+
+# Función para obtener detalles de una empresa
+@st.cache_data
+def get_company_details(company_id):
+    """Obtiene los detalles de una empresa específica"""
+    try:
+        url = COMPANY_DETAILS_URL.format(company_id=company_id)
+        response = requests.get(url)
+        data = response.json()
+        return data[0]['result']['data']
+    except:
+        st.error(f"Error obteniendo detalles de la empresa {company_id}")
+        return None
 
 # Función para calcular costos de producción
 def calculate_production_cost(resource, cost_per_pp, production_bonus, cache=None):
@@ -117,6 +145,59 @@ def fetch_market_orders(item_code, limit):
         st.error(f"❌ Error fetching market data: {e}")
         return [], []
 
+# Función para analizar empresas del usuario
+def analyze_companies(user_id, cost_per_pp, production_bonus):
+    """Analiza las empresas de un usuario para determinar rentabilidad"""
+    companies = get_user_companies(user_id)
+    market_prices = get_market_prices()
+    
+    if not companies or not market_prices:
+        return []
+    
+    results = []
+    
+    for company_id in companies:
+        company = get_company_details(company_id)
+        if not company:
+            continue
+            
+        resource = company.get('itemCode')
+        if resource not in PRODUCTION_DATA:
+            continue
+            
+        # Calcular costo de producción
+        production_cost = calculate_production_cost(resource, cost_per_pp, production_bonus)
+        market_price = market_prices.get(resource, 0)
+        profit_per_unit = market_price - production_cost
+        
+        # Analizar trabajadores
+        workers = company.get('workers', [])
+        total_wage = sum(worker.get('wage', 0) for worker in workers)
+        avg_wage = total_wage / len(workers) if workers else 0
+        wage_status = "Below" if avg_wage < cost_per_pp else "Above"
+        
+        # Calcular rentabilidad
+        is_profitable = profit_per_unit > 0
+        profit_margin = (profit_per_unit / market_price) * 100 if market_price > 0 else 0
+        
+        results.append({
+            "company_id": company_id,
+            "name": company.get('name', 'Unknown'),
+            "resource": resource,
+            "production": company.get('production', 0),
+            "worker_count": len(workers),
+            "avg_wage": avg_wage,
+            "cost_per_pp": cost_per_pp,
+            "wage_status": wage_status,
+            "production_cost": production_cost,
+            "market_price": market_price,
+            "profit_per_unit": profit_per_unit,
+            "profit_margin": profit_margin,
+            "is_profitable": is_profitable
+        })
+    
+    return results
+
 # Barra lateral
 st.sidebar.title("🔍 Market Explorer")
 item_options = [
@@ -156,11 +237,22 @@ production_bonus_percent = st.sidebar.slider(
 )
 production_bonus = production_bonus_percent / 100
 
+# Sección para análisis de empresas
+st.sidebar.title("🏢 Company Analysis")
+user_id = st.sidebar.text_input(
+    "User ID", 
+    value="68196d35dc610e77402347fa",
+    help="Ingrese el ID del usuario para analizar sus empresas"
+)
+
 # Cálculo de ROI
 roi_data = calculate_roi(cost_per_pp, production_bonus)
 
+# Análisis de empresas (solo si se solicita)
+analyze_companies_flag = st.sidebar.button("Analizar Empresas")
+
 # Pestañas para la visualización
-tab1, tab2 = st.tabs(["📈 Market Depth", "📊 ROI Analysis"])
+tab1, tab2, tab3 = st.tabs(["📈 Market Depth", "📊 ROI Analysis", "🏢 Company Analysis"])
 
 with tab1:
     st.title(f"📈 Market Depth Chart for {item_code}")
@@ -311,3 +403,94 @@ with tab2:
                 st.write(f"**ROI:** {row['roi']:.2f}%")
     else:
         st.warning("No se pudo calcular el ROI. Verifique la conexión a internet.")
+
+with tab3:
+    st.title("🏢 Company Analysis")
+    
+    if analyze_companies_flag:
+        with st.spinner("Analizando empresas..."):
+            companies_data = analyze_companies(user_id, cost_per_pp, production_bonus)
+        
+        if companies_data:
+            # Crear DataFrame con los resultados
+            companies_df = pd.DataFrame(companies_data)
+            
+            # Mostrar métricas generales
+            profitable_companies = len(companies_df[companies_df['is_profitable']])
+            below_cost_companies = len(companies_df[companies_df['wage_status'] == 'Below'])
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Empresas Rentables", f"{profitable_companies}/{len(companies_df)}")
+            with col2:
+                st.metric("Salarios por Debajo", f"{below_cost_companies}/{len(companies_df)}")
+            with col3:
+                avg_margin = companies_df['profit_margin'].mean()
+                st.metric("Margen Promedio", f"{avg_margin:.2f}%")
+            
+            # Mostrar tabla de empresas
+            st.subheader("Análisis de Empresas")
+            
+            # Formatear la tabla para mejor visualización
+            display_companies_df = companies_df.copy()
+            display_companies_df['avg_wage'] = display_companies_df['avg_wage'].apply(lambda x: f"{x:.6f}")
+            display_companies_df['production_cost'] = display_companies_df['production_cost'].apply(lambda x: f"{x:.6f}")
+            display_companies_df['market_price'] = display_companies_df['market_price'].apply(lambda x: f"{x:.4f}")
+            display_companies_df['profit_per_unit'] = display_companies_df['profit_per_unit'].apply(lambda x: f"{x:.6f}")
+            display_companies_df['profit_margin'] = display_companies_df['profit_margin'].apply(lambda x: f"{x:.2f}%")
+            
+            # Reordenar columnas
+            display_companies_df = display_companies_df[[
+                'name', 'resource', 'worker_count', 'avg_wage', 'wage_status',
+                'production_cost', 'market_price', 'profit_per_unit', 'profit_margin', 'is_profitable'
+            ]]
+            
+            st.dataframe(
+                display_companies_df,
+                use_container_width=True
+            )
+            
+            # Gráfico de rentabilidad
+            fig_companies = go.Figure()
+            fig_companies.add_trace(go.Bar(
+                x=companies_df['name'],
+                y=companies_df['profit_margin'],
+                marker_color=['green' if profitable else 'red' for profitable in companies_df['is_profitable']],
+                text=companies_df['resource'],
+                textposition='auto'
+            ))
+            fig_companies.update_layout(
+                title='Margen de Beneficio por Empresa',
+                xaxis_title='Empresa',
+                yaxis_title='Margen de Beneficio (%)',
+                xaxis_tickangle=-45,
+                height=500
+            )
+            st.plotly_chart(fig_companies, use_container_width=True)
+            
+            # Mostrar detalles de empresas problemáticas
+            st.subheader("Empresas con Posibles Problemas")
+            
+            # Empresas no rentables
+            unprofitable = companies_df[~companies_df['is_profitable']]
+            if not unprofitable.empty:
+                st.warning(f"{len(unprofitable)} empresas no son rentables")
+                for _, company in unprofitable.iterrows():
+                    with st.expander(f"{company['name']} - {company['resource']}"):
+                        st.write(f"**Costo de producción:** ${company['production_cost']:.6f}")
+                        st.write(f"**Precio de mercado:** ${company['market_price']:.4f}")
+                        st.write(f"**Pérdida por unidad:** ${-company['profit_per_unit']:.6f}")
+            
+            # Empresas con salarios por encima del costo
+            high_wage = companies_df[companies_df['wage_status'] == 'Above']
+            if not high_wage.empty:
+                st.info(f"{len(high_wage)} empresas con salarios por encima del costo de referencia")
+                for _, company in high_wage.iterrows():
+                    with st.expander(f"{company['name']} - Salario: {company['avg_wage']:.6f}"):
+                        st.write(f"**Salario promedio:** ${company['avg_wage']:.6f}")
+                        st.write(f"**Costo de referencia:** ${company['cost_per_pp']:.6f}")
+                        st.write(f"**Diferencia:** ${company['avg_wage'] - company['cost_per_pp']:.6f}")
+        else:
+            st.warning("No se pudieron analizar las empresas. Verifique el User ID y la conexión a internet.")
+    else:
+        st.info("Ingrese un User ID y haga clic en 'Analizar Empresas' para comenzar el análisis.")
