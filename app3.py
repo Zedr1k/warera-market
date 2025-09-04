@@ -288,10 +288,10 @@ user_id = st.sidebar.text_input(
 # Usamos un slider para el bonus pero con formato personalizado
 production_bonus_percent = st.sidebar.slider(
     "Bonus de Producción (%)", 
-    min_value=0, 
-    max_value=200, 
-    value=27,
-    help="Porcentaje de bonus de producción (0-200%)"
+    min_value=10, 
+    max_value=35, 
+    value=28,
+    help="Porcentaje de bonus de producción (10-35%)"
 )
 production_bonus = production_bonus_percent / 100
 
@@ -575,3 +575,4 @@ with tab3:
             st.warning("No se pudieron calcular los máximos costos. Verifique la conexión a internet.")
     else:
         st.info("Haga clic en 'Calcular Máximos Costos PP' para analizar los costos máximos por PP.")
+
