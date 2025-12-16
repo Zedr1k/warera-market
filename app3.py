@@ -676,14 +676,37 @@ with tab4:
                     'resource': resource,
                     'avg_price': price if price is not None else float('nan'),
                     'volume_24h': volume_24h,
-                    'bid_ask_spread': spread
+                    'bid_ask_spread': spread,
+                    "liquidity_score": (volume_24h or 0) * (spread or 0)
                 })
             arb_df = pd.DataFrame(rows)
-            arb_df_display = arb_df.sort_values(['volume_24h', 'avg_price'], ascending=[False, True])
-            arb_df_display['avg_price'] = arb_df_display['avg_price'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "N/A")
-            arb_df_display['volume_24h'] = arb_df_display['volume_24h'].apply(lambda x: f"{int(x)}" if pd.notna(x) and x is not None else "N/A")
-            arb_df_display['bid_ask_spread'] = arb_df_display['bid_ask_spread'].apply(lambda x: f"{x:.6f}" if pd.notna(x) and x is not None else "N/A")
-            st.dataframe(arb_df_display, use_container_width=True)
+            
+            # Eliminar basura: sin volumen o sin spread
+            arb_df = arb_df[
+                (arb_df["volume_24h"] > 0) &
+                (arb_df["bid_ask_spread"] > 0)
+            ]
+            
+            # Ranking: mayor oportunidad primero
+            arb_df["arbitrage_rank"] = (
+                arb_df["liquidity_score"]
+                .rank(method="dense", ascending=False)
+                .astype(int)
+            )
+            
+            arb_df = arb_df.sort_values("liquidity_score", ascending=False)
+            display_df = arb_df.copy()
+
+            display_df["avg_price"] = display_df["avg_price"].map(lambda x: f"{x:.4f}")
+            display_df["volume_24h"] = display_df["volume_24h"].map(lambda x: f"{int(x)}")
+            display_df["bid_ask_spread"] = display_df["bid_ask_spread"].map(lambda x: f"{x:.6f}")
+            display_df["liquidity_score"] = display_df["liquidity_score"].map(lambda x: f"{x:.2f}")
+            
+            display_df = display_df[
+                ["arbitrage_rank", "resource", "avg_price", "volume_24h", "bid_ask_spread", "liquidity_score"]
+            ]
+            
+            st.dataframe(display_df, use_container_width=True)
 
             st.markdown("**Notas:**")
             st.markdown("- `avg_price` viene de la misma llamada a precios usada en el análisis Max PP Cost.")
@@ -691,5 +714,6 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
+
 
 
