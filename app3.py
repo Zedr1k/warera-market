@@ -243,7 +243,7 @@ def fetch_trades(item_code, max_pages=20, headers=None):
         payload = {
             "itemCode": item_code,
             "limit": 100,
-            "transactionType": "trading"
+            "transactionType": "itemMarket"
         }
         if cursor:
             payload["cursor"] = cursor
@@ -679,5 +679,6 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
+
 
 
