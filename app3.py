@@ -233,46 +233,31 @@ def fetch_market_orders(item_code, limit):
         st.error(f"❌ Error fetching market data: {e}")
         return [], []
 
-# Nueva función: obtener trades (historial) - usada para calcular volumen en las últimas 24h
+# Nueva función: obtener trades (historial) usando transaction.getPaginatedTransactions
 @st.cache_data
 def fetch_trades(item_code, limit=200):
-    """Intenta obtener trades/historial de transacciones para un item. API puede variar; se manejan fallbacks."""
-    possible_endpoints = [
-        "https://api2.warera.io/trpc/itemTrading.getTrades",
-        "https://api2.warera.io/trpc/itemTrading.getHistory",
-        "https://api2.warera.io/trpc/tradingOrder.getTrades"
-    ]
+    """Obtiene transacciones usando transaction.getPaginatedTransactions.
+    Devuelve una lista de transacciones (puede estar vacía)."""
+    url = "https://api2.warera.io/trpc/transaction.getPaginatedTransactions"
     params = {
         "batch": "1",
-        "input": f"{{\"0\":{{\"itemCode\":\"{item_code}\", \"limit\":{limit}}}}}"
+        "input": json.dumps({
+            "0": {
+                "itemCode": item_code,
+                "limit": limit
+            }
+        })
     }
-    for url in possible_endpoints:
-        try:
-            r = requests.get(url, params=params, timeout=8)
-            r.raise_for_status()
-            parsed = r.json()
-            # Intentar encontrar la lista de trades en la respuesta
-            candidate = None
-            if isinstance(parsed, list) and parsed:
-                candidate = parsed[0].get('result', {}).get('data')
-            elif isinstance(parsed, dict):
-                candidate = parsed.get('result', {}).get('data')
-            if not candidate:
-                continue
-            # Si 'trades' está presente
-            if isinstance(candidate, dict) and 'trades' in candidate:
-                return candidate['trades']
-            # Si candidate ya es una lista de trades
-            if isinstance(candidate, list):
-                return candidate
-            # Si candidate contiene 'items' o 'data'
-            if isinstance(candidate, dict):
-                for k in ['items', 'data', 'history']:
-                    if k in candidate and isinstance(candidate[k], list):
-                        return candidate[k]
-        except Exception:
-            continue
-    # Si no se encontró historial, devolver lista vacía (caller mostrará N/A)
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        parsed = r.json()
+        data = parsed[0].get('result', {}).get('data', {})
+        # El endpoint devuelve { items: [...], nextCursor: ... }
+        if isinstance(data, dict) and 'items' in data:
+            return data['items']
+    except Exception as e:
+        st.warning(f"No se pudo obtener historial para {item_code}: {e}")
     return []
 
 @st.cache_data
