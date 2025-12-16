@@ -262,120 +262,49 @@ def fetch_trades(item_code, max_pages=20, headers=None):
     return all_items
 
 
-def fetch_24h_volume(item_code, headers=None, max_pages=20):
+def fetch_24h_volume(item_code):
     url = "https://api2.warera.io/trpc/transaction.getPaginatedTransactions"
     cutoff = datetime.utcnow() - timedelta(hours=24)
     volume = 0.0
     cursor = None
 
-    for _ in range(max_pages):
-        payload = {"itemCode": item_code, "limit": 100}
+    for _ in range(20):
+        payload = {
+            "itemCode": item_code,
+            "limit": 100
+        }
         if cursor:
             payload["cursor"] = cursor
-        params = {"batch": "1", "input": json.dumps({"0": payload})}
 
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=10)
-            r.raise_for_status()
-            data = r.json()[0].get("result", {}).get("data", {})
-            items = data.get("items", [])
-            if not items:
-                break
+        params = {
+            "batch": "1",
+            "input": json.dumps({"0": payload})
+        }
 
-            stop_early = False
-            for t in items:
-                ts = t.get('createdAt') or t.get('offerCreatedAt') or t.get('created_at') or t.get('timestamp') or t.get('time')
-                qty = t.get('quantity') or t.get('qty') or t.get('amount') or t.get('volume') or 0
-                if not ts:
-                    try:
-                        volume += float(qty)
-                    except Exception:
-                        continue
-                    continue
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
 
-                parsed_dt = None
-                if isinstance(ts, (int, float)):
-                    try:
-                        parsed_dt = datetime.utcfromtimestamp(ts / 1000.0) if ts > 1e12 else datetime.utcfromtimestamp(ts)
-                    except Exception:
-                        parsed_dt = None
-                elif isinstance(ts, str):
-                    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
-                        try:
-                            parsed_dt = datetime.strptime(ts, fmt)
-                            break
-                        except Exception:
-                            continue
+        data = r.json()[0]["result"]["data"]
+        items = data.get("items", [])
 
-                if not parsed_dt:
-                    continue
-
-                if parsed_dt >= cutoff:
-                    try:
-                        volume += float(qty)
-                    except Exception:
-                        continue
-                else:
-                    stop_early = True
-                    break
-
-            cursor = data.get('nextCursor')
-            if stop_early or not cursor:
-                break
-
-        except Exception as e:
-            st.warning(f"Error obteniendo volumen 24h para {item_code}: {e}")
+        if not items:
             break
 
-    return volume if volume > 0 else 0 if volume > 0 else None
+        for t in items:
+            ts = t.get("createdAt")
+            if not ts:
+                continue
 
-@st.cache_data
-def fetch_24h_volume(item_code):
-    """Calcula el volumen (cantidad) de transacciones en las últimas 24 horas sumando las trades recientes.
-    Devuelve None si no hay datos de trades."""
-    trades = fetch_trades(item_code, limit=500)
-    if not trades:
-        return None
-    now = datetime.utcnow()
-    cutoff = now - timedelta(days=1)
-    volume = 0
-    for t in trades:
-        # Muchas respuestas usan campos diferentes; intentamos extraer timestamp y cantidad
-        ts = t.get('createdAt') or t.get('created_at') or t.get('timestamp') or t.get('time')
-        qty = t.get('quantity') or t.get('qty') or t.get('amount') or t.get('volume') or 0
-        if not ts:
-            # si no hay timestamp asumimos que trade es reciente (poco fiable)
-            try:
-                volume += float(qty)
-            except Exception:
-                continue
-            continue
-        # Normalizar y parsear timestamp
-        parsed_dt = None
-        if isinstance(ts, (int, float)):
-            # timestamp en segundos o ms
-            try:
-                if ts > 1e12:
-                    parsed_dt = datetime.utcfromtimestamp(ts / 1000.0)
-                else:
-                    parsed_dt = datetime.utcfromtimestamp(ts)
-            except Exception:
-                parsed_dt = None
-        elif isinstance(ts, str):
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
-                try:
-                    parsed_dt = datetime.strptime(ts, fmt)
-                    break
-                except Exception:
-                    continue
-        if not parsed_dt:
-            # no pudimos parsear la fecha
-            continue
-        if parsed_dt >= cutoff:
-            try:
-                volume += float(qty)
-            except Exception:
-                continue
+            dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ")
+            if dt < cutoff:
+                return volume
+
+            volume += float(t.get("quantity", 0))
+
+        cursor = data.get("nextCursor")
+        if not cursor:
+            break
+
     return volume
 
 # Función para calcular máximos costos por PP para todos los recursos
@@ -762,4 +691,5 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
+
 
