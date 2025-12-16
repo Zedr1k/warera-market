@@ -1,9 +1,8 @@
-# app3.py
 import streamlit as st
 import pandas as pd
 import requests
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import urllib.parse
 
@@ -234,6 +233,97 @@ def fetch_market_orders(item_code, limit):
         st.error(f"❌ Error fetching market data: {e}")
         return [], []
 
+# Nueva función: obtener trades (historial) - usada para calcular volumen en las últimas 24h
+@st.cache_data
+def fetch_trades(item_code, limit=200):
+    """Intenta obtener trades/historial de transacciones para un item. API puede variar; se manejan fallbacks."""
+    possible_endpoints = [
+        "https://api2.warera.io/trpc/itemTrading.getTrades",
+        "https://api2.warera.io/trpc/itemTrading.getHistory",
+        "https://api2.warera.io/trpc/tradingOrder.getTrades"
+    ]
+    params = {
+        "batch": "1",
+        "input": f"{{\"0\":{{\"itemCode\":\"{item_code}\", \"limit\":{limit}}}}}"
+    }
+    for url in possible_endpoints:
+        try:
+            r = requests.get(url, params=params, timeout=8)
+            r.raise_for_status()
+            parsed = r.json()
+            # Intentar encontrar la lista de trades en la respuesta
+            candidate = None
+            if isinstance(parsed, list) and parsed:
+                candidate = parsed[0].get('result', {}).get('data')
+            elif isinstance(parsed, dict):
+                candidate = parsed.get('result', {}).get('data')
+            if not candidate:
+                continue
+            # Si 'trades' está presente
+            if isinstance(candidate, dict) and 'trades' in candidate:
+                return candidate['trades']
+            # Si candidate ya es una lista de trades
+            if isinstance(candidate, list):
+                return candidate
+            # Si candidate contiene 'items' o 'data'
+            if isinstance(candidate, dict):
+                for k in ['items', 'data', 'history']:
+                    if k in candidate and isinstance(candidate[k], list):
+                        return candidate[k]
+        except Exception:
+            continue
+    # Si no se encontró historial, devolver lista vacía (caller mostrará N/A)
+    return []
+
+@st.cache_data
+def fetch_24h_volume(item_code):
+    """Calcula el volumen (cantidad) de transacciones en las últimas 24 horas sumando las trades recientes.
+    Devuelve None si no hay datos de trades."""
+    trades = fetch_trades(item_code, limit=500)
+    if not trades:
+        return None
+    now = datetime.utcnow()
+    cutoff = now - timedelta(days=1)
+    volume = 0
+    for t in trades:
+        # Muchas respuestas usan campos diferentes; intentamos extraer timestamp y cantidad
+        ts = t.get('createdAt') or t.get('created_at') or t.get('timestamp') or t.get('time')
+        qty = t.get('quantity') or t.get('qty') or t.get('amount') or t.get('volume') or 0
+        if not ts:
+            # si no hay timestamp asumimos que trade es reciente (poco fiable)
+            try:
+                volume += float(qty)
+            except Exception:
+                continue
+            continue
+        # Normalizar y parsear timestamp
+        parsed_dt = None
+        if isinstance(ts, (int, float)):
+            # timestamp en segundos o ms
+            try:
+                if ts > 1e12:
+                    parsed_dt = datetime.utcfromtimestamp(ts / 1000.0)
+                else:
+                    parsed_dt = datetime.utcfromtimestamp(ts)
+            except Exception:
+                parsed_dt = None
+        elif isinstance(ts, str):
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+                try:
+                    parsed_dt = datetime.strptime(ts, fmt)
+                    break
+                except Exception:
+                    continue
+        if not parsed_dt:
+            # no pudimos parsear la fecha
+            continue
+        if parsed_dt >= cutoff:
+            try:
+                volume += float(qty)
+            except Exception:
+                continue
+    return volume
+
 # Función para calcular máximos costos por PP para todos los recursos
 def calculate_max_pp_costs(production_bonus):
     """Calcula el máximo costo por PP para todos los recursos"""
@@ -301,8 +391,11 @@ analyze_employees_flag = st.sidebar.button("Analizar Empleados")
 # Análisis de máximos costos por PP
 analyze_max_costs_flag = st.sidebar.button("Calcular Máximos Costos PP")
 
-# Pestañas para la visualización
-tab1, tab2, tab3 = st.tabs(["📈 Market Depth", "👥 Employee Analysis", "💰 Max PP Cost Analysis"])
+# Nuevo: análisis de arbitrage (volumen + precio)
+analyze_arbitrage_flag = st.sidebar.button("Analizar Arbitrage (24h)")
+
+# Pestañas para la visualización (ahora con la nueva pestaña)
+tab1, tab2, tab3, tab4 = st.tabs(["📈 Market Depth", "👥 Employee Analysis", "💰 Max PP Cost Analysis", "📊 Arbitrage Candidates"])
 
 with tab1:
     st.title(f"📈 Market Depth Chart for {item_code}")
@@ -354,8 +447,7 @@ with tab1:
             mode='lines',
             line_shape='hv',
             fill='tozeroy',
-            name='Buy',
-            line=dict(color='green')
+            name='Buy'
         ))
         fig.add_trace(go.Scatter(
             x=sell_df['price'],
@@ -363,8 +455,7 @@ with tab1:
             mode='lines',
             line_shape='hv',
             fill='tozeroy',
-            name='Sell',
-            line=dict(color='red')
+            name='Sell'
         ))
         fig.update_layout(
             title='Depth Chart',
@@ -442,7 +533,6 @@ with tab2:
             fig_employees.add_trace(go.Bar(
                 x=employees_df['worker_id'],
                 y=employees_df['profit_percentage'],
-                marker_color=['green' if profit > 0 else 'red' for profit in employees_df['profit_per_unit']],
                 text=employees_df['company_name'],
                 textposition='auto'
             ))
@@ -537,8 +627,7 @@ with tab3:
             fig_max_costs.add_trace(go.Bar(
                 x=max_costs_df['resource'],
                 y=max_costs_df['max_cost_no_deposit'],
-                name='Sin Bonus Depósito',
-                marker_color='blue'
+                name='Sin Bonus Depósito'
             ))
             
             # Agregar barras para materias primas con bonus de depósito
@@ -547,8 +636,7 @@ with tab3:
                 fig_max_costs.add_trace(go.Bar(
                     x=raw_materials_df['resource'],
                     y=raw_materials_df['max_cost_with_deposit'],
-                    name='Con Bonus Depósito (30%)',
-                    marker_color='orange'
+                    name='Con Bonus Depósito (30%)'
                 ))
             
             fig_max_costs.update_layout(
@@ -576,3 +664,32 @@ with tab3:
     else:
         st.info("Haga clic en 'Calcular Máximos Costos PP' para analizar los costos máximos por PP.")
 
+with tab4:
+    st.title("📊 Arbitrage Candidates — Precio Actual y Volumen 24h")
+    st.write("En una sola tabla: todos los recursos, precio promedio actual (usado en Max PP Cost Analysis) y volumen de transacciones en las últimas 24 horas.")
+
+    if analyze_arbitrage_flag:
+        with st.spinner("Calculando precios y volúmenes (esto puede tardar según la API)..."):
+            market_prices = get_market_prices()
+            rows = []
+            for resource in sorted(PRODUCTION_DATA.keys()):
+                price = market_prices.get(resource)
+                volume_24h = fetch_24h_volume(resource)
+                rows.append({
+                    'resource': resource,
+                    'avg_price': price if price is not None else float('nan'),
+                    'volume_24h': volume_24h
+                })
+            arb_df = pd.DataFrame(rows)
+            # Mostrar mejor ordenado por volumen (desc) y luego por precio
+            arb_df_display = arb_df.sort_values(['volume_24h', 'avg_price'], ascending=[False, True])
+            # Formateo
+            arb_df_display['avg_price'] = arb_df_display['avg_price'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "N/A")
+            arb_df_display['volume_24h'] = arb_df_display['volume_24h'].apply(lambda x: f"{int(x)}" if pd.notna(x) and x is not None else "N/A")
+            st.dataframe(arb_df_display, use_container_width=True)
+
+            st.markdown("**Notas:**")
+            st.markdown("- `avg_price` viene de la misma llamada a precios usada en el análisis Max PP Cost.")
+            st.markdown("- `volume_24h` se calcula sumando trades del historial (si la API lo provee). Si la API no devuelve historial, aparecerá `N/A`.")
+    else:
+        st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
