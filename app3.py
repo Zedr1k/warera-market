@@ -233,143 +233,66 @@ def fetch_market_orders(item_code, limit):
         st.error(f"❌ Error fetching market data: {e}")
         return [], []
 
-# Nueva función: obtener trades (historial) usando transaction.getPaginatedTransactions
 @st.cache_data
-def fetch_trades(item_code, limit=100, max_pages=10, headers=None):
-    """Obtiene transacciones paginadas. Paginación correcta: no añadir 'cursor' al payload si es None.
-    - `limit` es el tamaño de página (máx 100).
-    - `max_pages` limita la cantidad de páginas a recuperar para evitar loops infinitos.
-    - `headers` permite pasar encabezados si se requiere autenticación."""
+def fetch_trades(item_code, max_pages=20, headers=None):
     url = "https://api2.warera.io/trpc/transaction.getPaginatedTransactions"
-    transactions = []
+    all_items = []
     cursor = None
-    page = 0
-    page_limit = min(max(1, int(limit)), 100)
 
-    while page < max_pages:
+    for _ in range(max_pages):
         payload = {
-            "limit": page_limit,
             "itemCode": item_code,
+            "limit": 100,
             "transactionType": "trading"
         }
         if cursor:
             payload["cursor"] = cursor
 
-        params = {"batch": "1", "input": json.dumps({"0": payload})}
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=10)
-            r.raise_for_status()
-            parsed = r.json()
-            data = parsed[0].get('result', {}).get('data', {}) if isinstance(parsed, list) and parsed else {}
-            items = data.get('items') or []
-            transactions.extend(items)
-            cursor = data.get('nextCursor')
-            page += 1
-            if not cursor:
-                break
-        except Exception as e:
-            st.warning(f"Error obteniendo transacciones para {item_code}: {e}")
+        params = {
+            "batch": "1",
+            "input": json.dumps({"0": payload})
+        }
+
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+
+        data = r.json()[0]["result"]["data"]
+        items = data.get("items", [])
+        if not items:
             break
-    return transactions
+
+        all_items.extend(items)
+        cursor = data.get("nextCursor")
+        if not cursor:
+            break
+
+    return all_items
 
 @st.cache_data
 def fetch_24h_volume(item_code, headers=None):
-    """Suma la cantidad de transacciones en las últimas 24 horas usando paginación segura."""
-    now = datetime.utcnow()
-    cutoff = now - timedelta(days=1)
-    volume = 0.0
-    # Recuperar páginas hasta que no haya cursor o lleguemos a items anteriores a 24h
-    page = 0
-    cursor = None
-    while True:
-        trades = fetch_trades(item_code, limit=100, max_pages=20, headers=headers)
-        if not trades:
-            break
-        stop_early = False
-        for t in trades:
-            ts = t.get('createdAt') or t.get('offerCreatedAt') or t.get('created_at')
-            qty = t.get('quantity') or t.get('qty') or t.get('amount') or t.get('volume') or 0
-            if not ts:
-                try:
-                    volume += float(qty)
-                except Exception:
-                    continue
-                continue
-            parsed_dt = None
-            if isinstance(ts, (int, float)):
-                try:
-                    parsed_dt = datetime.utcfromtimestamp(ts / 1000.0) if ts > 1e12 else datetime.utcfromtimestamp(ts)
-                except Exception:
-                    parsed_dt = None
-            elif isinstance(ts, str):
-                for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
-                    try:
-                        parsed_dt = datetime.strptime(ts, fmt)
-                        break
-                    except Exception:
-                        continue
-            if not parsed_dt:
-                continue
-            if parsed_dt >= cutoff:
-                try:
-                    volume += float(qty)
-                except Exception:
-                    continue
-            else:
-                stop_early = True
-        # Si encontramos transacciones más antiguas que 24h, asumimos que las siguientes páginas también lo serán
-        if stop_early:
-            break
-        break
-    return volume if volume > 0 else None
-
-@st.cache_data
-def fetch_24h_volume(item_code):
-    """Calcula el volumen (cantidad) de transacciones en las últimas 24 horas sumando las trades recientes.
-    Devuelve None si no hay datos de trades."""
-    trades = fetch_trades(item_code, limit=500)
+    trades = fetch_trades(item_code, headers=headers)
     if not trades:
-        return None
-    now = datetime.utcnow()
-    cutoff = now - timedelta(days=1)
-    volume = 0
+        return 0
+
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    volume = 0.0
+
     for t in trades:
-        # Muchas respuestas usan campos diferentes; intentamos extraer timestamp y cantidad
-        ts = t.get('createdAt') or t.get('created_at') or t.get('timestamp') or t.get('time')
-        qty = t.get('quantity') or t.get('qty') or t.get('amount') or t.get('volume') or 0
+        ts = t.get("createdAt")
         if not ts:
-            # si no hay timestamp asumimos que trade es reciente (poco fiable)
-            try:
-                volume += float(qty)
-            except Exception:
-                continue
             continue
-        # Normalizar y parsear timestamp
-        parsed_dt = None
-        if isinstance(ts, (int, float)):
-            # timestamp en segundos o ms
-            try:
-                if ts > 1e12:
-                    parsed_dt = datetime.utcfromtimestamp(ts / 1000.0)
-                else:
-                    parsed_dt = datetime.utcfromtimestamp(ts)
-            except Exception:
-                parsed_dt = None
-        elif isinstance(ts, str):
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
-                try:
-                    parsed_dt = datetime.strptime(ts, fmt)
-                    break
-                except Exception:
-                    continue
-        if not parsed_dt:
-            # no pudimos parsear la fecha
-            continue
-        if parsed_dt >= cutoff:
-            try:
-                volume += float(qty)
-            except Exception:
-                continue
+
+        try:
+            dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ")
+        except ValueError:
+            dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+
+        # ⚠️ Las trades vienen ordenadas de más nuevas a más viejas
+        if dt < cutoff:
+            break
+
+        volume += float(t.get("quantity", 0))
+
     return volume
 
 # Función para calcular máximos costos por PP para todos los recursos
@@ -756,4 +679,5 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
+
 
