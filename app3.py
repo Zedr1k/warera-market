@@ -233,80 +233,74 @@ def fetch_market_orders(item_code, limit):
         st.error(f"❌ Error fetching market data: {e}")
         return [], []
 
-# Nueva función: obtener trades (historial) usando transaction.getPaginatedTransactions
+# Función para obtener transacciones históricas usando paginación
 @st.cache_data
-def fetch_trades(item_code, limit=200):
-    """Obtiene transacciones usando transaction.getPaginatedTransactions.
-    Devuelve una lista de transacciones (puede estar vacía)."""
-    url = "https://api2.warera.io/trpc/transaction.getPaginatedTransactions"
-    params = {
-        "batch": "1",
-        "input": json.dumps({
-            "0": {
-                "itemCode": item_code,
-                "limit": limit
-            }
-        })
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        parsed = r.json()
-        data = parsed[0].get('result', {}).get('data', {})
-        # El endpoint devuelve { items: [...], nextCursor: ... }
-        if isinstance(data, dict) and 'items' in data:
-            return data['items']
-    except Exception as e:
-        st.warning(f"No se pudo obtener historial para {item_code}: {e}")
-    return []
+def fetch_trades(item_code, limit=100):
+    """Obtiene transacciones históricas para un item específico con paginación."""
+    transactions = []
+    cursor = None
+    
+    while True:
+        params = {
+            "batch": "1",
+            "input": json.dumps({
+                "0": {
+                    "itemCode": item_code,
+                    "limit": limit,
+                    "cursor": cursor
+                }
+            })
+        }
+        try:
+            r = requests.get("https://api2.warera.io/trpc/transaction.getPaginatedTransactions", params=params)
+            r.raise_for_status()
+            data = r.json()
+            items = data[0].get('result', {}).get('data', {}).get('items', [])
+            transactions.extend(items)
 
+            cursor = data[0].get('result', {}).get('data', {}).get('nextCursor')
+            if not cursor:
+                break
+        except Exception as e:
+            st.error(f"Error al obtener las transacciones para {item_code}: {e}")
+            break
+            
+    return transactions
+
+# Función para obtener el Bid-Ask Spread
+def calculate_bid_ask_spread(item_code):
+    """Calcula el spread entre el precio de compra más alto y el precio de venta más bajo."""
+    buy_orders, sell_orders = fetch_market_orders(item_code, limit=100)
+    buy_df = pd.DataFrame(buy_orders)
+    sell_df = pd.DataFrame(sell_orders)
+
+    if not buy_df.empty and not sell_df.empty:
+        highest_bid = buy_df['price'].max() if not buy_df.empty else None
+        lowest_ask = sell_df['price'].min() if not sell_df.empty else None
+        if highest_bid and lowest_ask:
+            spread = lowest_ask - highest_bid
+            return spread
+    return None
+
+# Función para obtener el volumen de transacciones en las últimas 24 horas
 @st.cache_data
 def fetch_24h_volume(item_code):
-    """Calcula el volumen (cantidad) de transacciones en las últimas 24 horas sumando las trades recientes.
-    Devuelve None si no hay datos de trades."""
-    trades = fetch_trades(item_code, limit=500)
-    if not trades:
-        return None
+    """Obtiene el volumen de transacciones en las últimas 24 horas."""
+    trades = fetch_trades(item_code)
+    volume = 0
     now = datetime.utcnow()
     cutoff = now - timedelta(days=1)
-    volume = 0
-    for t in trades:
-        # Muchas respuestas usan campos diferentes; intentamos extraer timestamp y cantidad
-        ts = t.get('createdAt') or t.get('created_at') or t.get('timestamp') or t.get('time')
-        qty = t.get('quantity') or t.get('qty') or t.get('amount') or t.get('volume') or 0
-        if not ts:
-            # si no hay timestamp asumimos que trade es reciente (poco fiable)
-            try:
-                volume += float(qty)
-            except Exception:
-                continue
-            continue
-        # Normalizar y parsear timestamp
-        parsed_dt = None
-        if isinstance(ts, (int, float)):
-            # timestamp en segundos o ms
-            try:
-                if ts > 1e12:
-                    parsed_dt = datetime.utcfromtimestamp(ts / 1000.0)
-                else:
-                    parsed_dt = datetime.utcfromtimestamp(ts)
-            except Exception:
-                parsed_dt = None
-        elif isinstance(ts, str):
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
-                try:
-                    parsed_dt = datetime.strptime(ts, fmt)
-                    break
-                except Exception:
-                    continue
-        if not parsed_dt:
-            # no pudimos parsear la fecha
-            continue
-        if parsed_dt >= cutoff:
-            try:
-                volume += float(qty)
-            except Exception:
-                continue
+
+    for trade in trades:
+        ts = trade.get('createdAt')
+        qty = trade.get('quantity', 0)
+        
+        # Verificar si la transacción está dentro del período de 24 horas
+        if ts:
+            ts = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+            if ts >= cutoff:
+                volume += qty
+
     return volume
 
 # Función para calcular máximos costos por PP para todos los recursos
@@ -651,30 +645,28 @@ with tab3:
 
 with tab4:
     st.title("📊 Arbitrage Candidates — Precio Actual y Volumen 24h")
-    st.write("En una sola tabla: todos los recursos, precio promedio actual (usado en Max PP Cost Analysis) y volumen de transacciones en las últimas 24 horas.")
+    st.write("En una sola tabla: todos los recursos, precio promedio actual, volumen de transacciones en las últimas 24 horas y bid-ask spread.")
 
     if analyze_arbitrage_flag:
-        with st.spinner("Calculando precios y volúmenes (esto puede tardar según la API)..."):
+        with st.spinner("Calculando precios y volúmenes..."):
             market_prices = get_market_prices()
             rows = []
             for resource in sorted(PRODUCTION_DATA.keys()):
                 price = market_prices.get(resource)
                 volume_24h = fetch_24h_volume(resource)
+                spread = calculate_bid_ask_spread(resource)
                 rows.append({
                     'resource': resource,
                     'avg_price': price if price is not None else float('nan'),
-                    'volume_24h': volume_24h
+                    'volume_24h': volume_24h,
+                    'bid_ask_spread': spread if spread is not None else float('nan')
                 })
             arb_df = pd.DataFrame(rows)
-            # Mostrar mejor ordenado por volumen (desc) y luego por precio
             arb_df_display = arb_df.sort_values(['volume_24h', 'avg_price'], ascending=[False, True])
-            # Formateo
             arb_df_display['avg_price'] = arb_df_display['avg_price'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "N/A")
             arb_df_display['volume_24h'] = arb_df_display['volume_24h'].apply(lambda x: f"{int(x)}" if pd.notna(x) and x is not None else "N/A")
+            arb_df_display['bid_ask_spread'] = arb_df_display['bid_ask_spread'].apply(lambda x: f"{x:.4f}" if pd.notna(x) and x is not None else "N/A")
             st.dataframe(arb_df_display, use_container_width=True)
-
-            st.markdown("**Notas:**")
-            st.markdown("- `avg_price` viene de la misma llamada a precios usada en el análisis Max PP Cost.")
-            st.markdown("- `volume_24h` se calcula sumando trades del historial (si la API lo provee). Si la API no devuelve historial, aparecerá `N/A`.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
+
