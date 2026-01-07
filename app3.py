@@ -400,7 +400,7 @@ def get_country_production_bonus_map():
     El valor retornado está en fracción (ej. 0.05 para 5%)."""
     url = "https://api2.warera.io/trpc/country.getAllCountries"
     try:
-        r = requests.get(url, params="", timeout=1)
+        r = requests.get(url, timeout=1)
         r.raise_for_status()
         parsed = r.json()
         data = None
@@ -830,5 +830,6 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
+
 
 
