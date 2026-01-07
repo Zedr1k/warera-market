@@ -163,46 +163,42 @@ def calculate_max_pp_cost(resource, production_bonus, market_prices, use_deposit
     return max_cost_per_pp
 
 # Función para analizar empleados con costos reales
-def analyze_employees_with_real_costs(user_id, production_bonus):
-    """Analiza la rentabilidad de cada empleado individualmente usando su salario como costo por PP"""
+def analyze_employees_with_real_costs(user_id, country_bonus_map, default_production_bonus):
+    """Analiza la rentabilidad de empleados usando el bonus máximo por recurso.
+    - country_bonus_map: dict {resource: bonus_fraction}
+    - default_production_bonus: fallback si el recurso no tiene country bonus (fracción)
+    """
     companies = get_user_companies(user_id)
     market_prices = get_market_prices()
-    
     if not companies or not market_prices:
         return []
-    
+
     employees_analysis = []
-    
+
     for company_id in companies:
         company = get_company_details(company_id)
         if not company:
             continue
-            
+
         resource = company.get('itemCode')
         if resource not in PRODUCTION_DATA:
             continue
-        
-        # Obtener precio de mercado del recurso
+
         market_price = market_prices.get(resource, 0)
-        
-        # Analizar cada empleado
+
+        # obtener bonus para este recurso (fracción), fallback al default
+        resource_bonus = country_bonus_map.get(resource, default_production_bonus)
+
         workers = company.get('workers', [])
         for worker in workers:
             wage = worker.get('wage', 0)
             worker_id = worker.get('user', '')
-            
-            # Calcular costo de producción usando el salario del empleado como costo por PP
-            production_cost = calculate_production_cost_with_market(resource, wage, production_bonus, market_prices)
-            
-            # Calcular ganancia por unidad
+
+            production_cost = calculate_production_cost_with_market(resource, wage, resource_bonus, market_prices)
             profit_per_unit = market_price - production_cost
-            
-            # Calcular porcentaje de ganancia
             profit_percentage = (profit_per_unit / production_cost) * 100 if production_cost > 0 else float('inf')
-            
-            # Determinar si es rentable
             is_profitable = profit_per_unit > 0
-            
+
             employees_analysis.append({
                 "company_name": company.get('name', 'Unknown'),
                 "resource": resource,
@@ -212,9 +208,10 @@ def analyze_employees_with_real_costs(user_id, production_bonus):
                 "market_price": market_price,
                 "profit_per_unit": profit_per_unit,
                 "profit_percentage": profit_percentage,
-                "is_profitable": is_profitable
+                "is_profitable": is_profitable,
+                "resource_bonus": resource_bonus
             })
-    
+
     return employees_analysis
 
 # Función para obtener órdenes de mercado
@@ -262,6 +259,74 @@ def fetch_trades(item_code, max_pages=20, headers=None):
     return all_items
 
 
+def fetch_24h_volume(item_code, headers=None, max_pages=20):
+    url = "https://api2.warera.io/trpc/transaction.getPaginatedTransactions"
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    volume = 0.0
+    cursor = None
+
+    for _ in range(max_pages):
+        payload = {"itemCode": item_code, "limit": 100}
+        if cursor:
+            payload["cursor"] = cursor
+        params = {"batch": "1", "input": json.dumps({"0": payload})}
+
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=10)
+            r.raise_for_status()
+            data = r.json()[0].get("result", {}).get("data", {})
+            items = data.get("items", [])
+            if not items:
+                break
+
+            stop_early = False
+            for t in items:
+                ts = t.get('createdAt') or t.get('offerCreatedAt') or t.get('created_at') or t.get('timestamp') or t.get('time')
+                qty = t.get('quantity') or t.get('qty') or t.get('amount') or t.get('volume') or 0
+                if not ts:
+                    try:
+                        volume += float(qty)
+                    except Exception:
+                        continue
+                    continue
+
+                parsed_dt = None
+                if isinstance(ts, (int, float)):
+                    try:
+                        parsed_dt = datetime.utcfromtimestamp(ts / 1000.0) if ts > 1e12 else datetime.utcfromtimestamp(ts)
+                    except Exception:
+                        parsed_dt = None
+                elif isinstance(ts, str):
+                    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+                        try:
+                            parsed_dt = datetime.strptime(ts, fmt)
+                            break
+                        except Exception:
+                            continue
+
+                if not parsed_dt:
+                    continue
+
+                if parsed_dt >= cutoff:
+                    try:
+                        volume += float(qty)
+                    except Exception:
+                        continue
+                else:
+                    stop_early = True
+                    break
+
+            cursor = data.get('nextCursor')
+            if stop_early or not cursor:
+                break
+
+        except Exception as e:
+            st.warning(f"Error obteniendo volumen 24h para {item_code}: {e}")
+            break
+
+    return volume if volume > 0 else 0 if volume > 0 else None
+
+@st.cache_data
 def fetch_24h_volume(item_code):
     url = "https://api2.warera.io/trpc/transaction.getPaginatedTransactions"
     cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -291,54 +356,127 @@ def fetch_24h_volume(item_code):
             break
 
         for t in items:
-            ts = t.get("createdAt")
+            ts = t.get("createdAt") or t.get("offerCreatedAt") or t.get('created_at') or t.get('timestamp') or t.get('time')
             if not ts:
                 continue
 
-            dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ")
-            if dt < cutoff:
+            parsed_dt = None
+            if isinstance(ts, (int, float)):
+                try:
+                    parsed_dt = datetime.utcfromtimestamp(ts / 1000.0) if ts > 1e12 else datetime.utcfromtimestamp(ts)
+                except Exception:
+                    parsed_dt = None
+            elif isinstance(ts, str):
+                for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        parsed_dt = datetime.strptime(ts, fmt)
+                        break
+                    except Exception:
+                        continue
+
+            if not parsed_dt:
+                continue
+
+            if parsed_dt < cutoff:
                 return volume
 
-            volume += float(t.get("quantity", 0))
+            qty = t.get('quantity') or t.get('qty') or t.get('amount') or t.get('volume') or 0
+            try:
+                volume += float(qty)
+            except Exception:
+                continue
 
-        cursor = data.get("nextCursor")
+        cursor = data.get('nextCursor')
         if not cursor:
             break
 
     return volume
 
+
+@st.cache_data
+def get_country_production_bonus_map():
+    """Devuelve un diccionario {itemCode: max_production_bonus_fraction}.
+    Busca en rankings.countryProductionBonus.value y en strategicResources.bonuses.productionPercent como fallback.
+    El valor retornado está en fracción (ej. 0.05 para 5%)."""
+    url = "https://api2.warera.io/trpc/country.getAllCountries"
+    params = {"batch": "1", "input": "{}"}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        parsed = r.json()
+        data = None
+        if isinstance(parsed, list) and parsed:
+            data = parsed[0].get('result', {}).get('data')
+        elif isinstance(parsed, dict):
+            data = parsed.get('result', {}).get('data')
+        if not data:
+            return {}
+
+        bonus_map = {}
+        for c in data:
+            item = c.get('specializedItem')
+            if not item:
+                continue
+            # intentar distintas fuentes de bonus
+            bonus = None
+            try:
+                bonus = c.get('rankings', {}).get('countryProductionBonus', {}).get('value')
+            except Exception:
+                bonus = None
+            if bonus is None:
+                # fallback a estructura estratégica
+                bonus = c.get('strategicResources', {}).get('bonuses', {}).get('productionPercent')
+            if bonus is None:
+                # otro posible campo
+                cpb = c.get('countryProductionBonus')
+                if isinstance(cpb, dict):
+                    bonus = cpb.get('value')
+                elif isinstance(cpb, (int, float)):
+                    bonus = cpb
+            if bonus is None:
+                continue
+            try:
+                bonus_val = float(bonus) / 100.0
+            except Exception:
+                continue
+            prev = bonus_map.get(item)
+            if prev is None or bonus_val > prev:
+                bonus_map[item] = bonus_val
+        return bonus_map
+    except Exception as e:
+        st.warning(f"No se pudo obtener country bonuses: {e}")
+        return {}
+
 # Función para calcular máximos costos por PP para todos los recursos
-def calculate_max_pp_costs(production_bonus):
-    """Calcula el máximo costo por PP para todos los recursos"""
+def calculate_max_pp_costs(country_bonus_map, default_production_bonus):
+    """Calcula el máximo costo por PP para todos los recursos usando el bonus máximo por recurso.
+    - country_bonus_map: dict {resource: bonus_fraction}
+    - default_production_bonus: fallback fracción
+    """
     market_prices = get_market_prices()
-    
     if not market_prices:
         return []
-    
+
     results = []
-    
     for resource in PRODUCTION_DATA:
         if resource not in market_prices:
             continue
-            
         market_price = market_prices[resource]
-        
-        # Calcular máximo costo por PP sin bonus de depósito
-        max_cost_no_deposit = calculate_max_pp_cost(resource, production_bonus, market_prices, False)
-        
-        # Calcular máximo costo por PP con bonus de depósito (solo para materias primas)
+        resource_bonus = country_bonus_map.get(resource, default_production_bonus)
+
+        max_cost_no_deposit = calculate_max_pp_cost(resource, resource_bonus, market_prices, False)
         max_cost_with_deposit = None
         if resource in RAW_MATERIALS:
-            max_cost_with_deposit = calculate_max_pp_cost(resource, production_bonus, market_prices, True)
-        
+            max_cost_with_deposit = calculate_max_pp_cost(resource, resource_bonus, market_prices, True)
+
         results.append({
             "resource": resource,
             "market_price": market_price,
             "max_cost_no_deposit": max_cost_no_deposit,
             "max_cost_with_deposit": max_cost_with_deposit,
-            "is_raw_material": resource in RAW_MATERIALS
+            "is_raw_material": resource in RAW_MATERIALS,
+            "resource_bonus": resource_bonus
         })
-    
     return results
 
 # Barra lateral
@@ -466,7 +604,8 @@ with tab2:
     
     if analyze_employees_flag:
         with st.spinner("Analizando empleados..."):
-            employees_data = analyze_employees_with_real_costs(user_id, production_bonus)
+            country_bonus_map = get_country_production_bonus_map()
+            employees_data = analyze_employees_with_real_costs(user_id, country_bonus_map, production_bonus)
         
         if employees_data:
             # Crear DataFrame con los resultados
@@ -562,7 +701,8 @@ with tab3:
     
     if analyze_max_costs_flag:
         with st.spinner("Calculando máximos costos por PP..."):
-            max_costs_data = calculate_max_pp_costs(production_bonus)
+            country_bonus_map = get_country_production_bonus_map()
+            max_costs_data = calculate_max_pp_costs(country_bonus_map, production_bonus)
         
         if max_costs_data:
             # Crear DataFrame con los resultados
@@ -676,37 +816,14 @@ with tab4:
                     'resource': resource,
                     'avg_price': price if price is not None else float('nan'),
                     'volume_24h': volume_24h,
-                    'bid_ask_spread': spread,
-                    "liquidity_score": (volume_24h or 0) * (spread or 0)
+                    'bid_ask_spread': spread
                 })
             arb_df = pd.DataFrame(rows)
-            
-            # Eliminar basura: sin volumen o sin spread
-            arb_df = arb_df[
-                (arb_df["volume_24h"] > 0) &
-                (arb_df["bid_ask_spread"] > 0)
-            ]
-            
-            # Ranking: mayor oportunidad primero
-            arb_df["arbitrage_rank"] = (
-                arb_df["liquidity_score"]
-                .rank(method="dense", ascending=False)
-                .astype(int)
-            )
-            
-            arb_df = arb_df.sort_values("liquidity_score", ascending=False)
-            display_df = arb_df.copy()
-
-            display_df["avg_price"] = display_df["avg_price"].map(lambda x: f"{x:.4f}")
-            display_df["volume_24h"] = display_df["volume_24h"].map(lambda x: f"{int(x)}")
-            display_df["bid_ask_spread"] = display_df["bid_ask_spread"].map(lambda x: f"{x:.6f}")
-            display_df["liquidity_score"] = display_df["liquidity_score"].map(lambda x: f"{x:.2f}")
-            
-            display_df = display_df[
-                ["arbitrage_rank", "resource", "avg_price", "volume_24h", "bid_ask_spread", "liquidity_score"]
-            ]
-            
-            st.dataframe(display_df, use_container_width=True)
+            arb_df_display = arb_df.sort_values(['volume_24h', 'avg_price'], ascending=[False, True])
+            arb_df_display['avg_price'] = arb_df_display['avg_price'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "N/A")
+            arb_df_display['volume_24h'] = arb_df_display['volume_24h'].apply(lambda x: f"{int(x)}" if pd.notna(x) and x is not None else "N/A")
+            arb_df_display['bid_ask_spread'] = arb_df_display['bid_ask_spread'].apply(lambda x: f"{x:.6f}" if pd.notna(x) and x is not None else "N/A")
+            st.dataframe(arb_df_display, use_container_width=True)
 
             st.markdown("**Notas:**")
             st.markdown("- `avg_price` viene de la misma llamada a precios usada en el análisis Max PP Cost.")
@@ -714,6 +831,4 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
-
-
 
