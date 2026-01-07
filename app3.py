@@ -431,7 +431,7 @@ def get_country_production_bonus_map():
             return bonus_map
 
         data = r.json()
-        countries = data["result"]["data"]["items"]
+        countries = data["result"]["data"]
 
         for c in countries:
             item = c.get("specializedItem")
@@ -851,5 +851,6 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
+
 
 
