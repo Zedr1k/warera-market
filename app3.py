@@ -53,14 +53,35 @@ RAW_MATERIALS = [resource for resource, data in PRODUCTION_DATA.items() if not d
 
 # Función para obtener precios de mercado
 @st.cache_data
-def get_market_prices():
-    """Obtiene precios actuales del mercado desde la API"""
+def get_market_prices(headers=None):
+    """Obtiene precios actuales del mercado desde la API de forma robusta.
+    Devuelve dict vacío en caso de error y escribe un warning con detalles (status/text) para debug.
+    Acepta headers opcionales (por ejemplo token).
+    """
     try:
-        response = requests.get(PRICES_URL)
-        data = response.json()
+        res = requests.get(PRICES_URL, headers=headers, timeout=10)
+    except Exception as e:
+        st.warning(f"Error realizando request a PRICES_URL: {e}")
+        return {}
+
+    if res.status_code != 200:
+        st.warning(f"Error en respuesta HTTP de precios: {res.status_code} - {res.text[:200]}")
+        return {}
+
+    if not res.text or not res.text.strip():
+        st.warning("Respuesta vacía al solicitar precios de mercado.")
+        return {}
+
+    try:
+        data = res.json()
+    except Exception as e:
+        st.warning(f"Error parseando JSON de precios de mercado: {e} - response snippet: {res.text[:500]}")
+        return {}
+
+    try:
         return data[0]['result']['data']
     except Exception as e:
-        st.error(f"Error obteniendo precios de mercado: {str(e)}")
+        st.warning(f"Estructura inesperada en response de precios: {e}")
         return {}
 
 # Función para obtener empresas de un usuario
@@ -394,22 +415,78 @@ def fetch_24h_volume(item_code):
 
 
 @st.cache_data
-def get_country_production_bonus_map():
+def get_country_production_bonus_map(headers=None):
     """Devuelve un diccionario {itemCode: max_production_bonus_fraction}.
-    Busca en rankings.countryProductionBonus.value y en strategicResources.bonuses.productionPercent como fallback.
-    El valor retornado está en fracción (ej. 0.05 para 5%)."""
+    Maneja respuestas no-json y detecta si el bonus ya viene en fracción o en porciento.
+    """
     url = "https://api2.warera.io/trpc/country.getAllCountries"
+    params = {"batch": "1", "input": "{}"}
     try:
-        r = requests.get(url, timeout=1)
-        r.raise_for_status()
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+    except Exception as e:
+        st.warning(f"Error realizando request a country.getAllCountries: {e}")
+        return {}
+
+    if r.status_code != 200:
+        st.warning(f"Error en respuesta HTTP countries: {r.status_code} - {r.text[:200]}")
+        return {}
+
+    if not r.text or not r.text.strip():
+        st.warning("Respuesta vacía al solicitar country bonuses.")
+        return {}
+
+    try:
         parsed = r.json()
-        data = None
-        if isinstance(parsed, list) and parsed:
-            data = parsed[0].get('result', {}).get('data')
-        elif isinstance(parsed, dict):
-            data = parsed.get('result', {}).get('data')
-        if not data:
-            return {}
+    except Exception as e:
+        st.warning(f"Error parseando JSON de countries: {e} - response snippet: {r.text[:500]}")
+        return {}
+
+    data = None
+    if isinstance(parsed, list) and parsed:
+        data = parsed[0].get('result', {}).get('data')
+    elif isinstance(parsed, dict):
+        data = parsed.get('result', {}).get('data')
+    if not data:
+        st.warning('No se encontró data en country.getAllCountries response')
+        return {}
+
+    bonus_map = {}
+    for c in data:
+        item = c.get('specializedItem')
+        if not item:
+            continue
+
+        bonus = None
+        # varios caminos posibles en la respuesta
+        try:
+            bonus = c.get('rankings', {}).get('countryProductionBonus', {}).get('value')
+        except Exception:
+            bonus = None
+        if bonus is None:
+            bonus = c.get('strategicResources', {}).get('bonuses', {}).get('productionPercent')
+        if bonus is None:
+            cpb = c.get('countryProductionBonus')
+            if isinstance(cpb, dict):
+                bonus = cpb.get('value')
+            elif isinstance(cpb, (int, float)):
+                bonus = cpb
+
+        if bonus is None:
+            continue
+
+        # Detectar si el valor está en porcentaje (ej 5) o fracción (0.05)
+        try:
+            bonus_val = float(bonus)
+        except Exception:
+            continue
+        if bonus_val > 1.0:
+            bonus_val = bonus_val / 100.0
+
+        prev = bonus_map.get(item)
+        if prev is None or bonus_val > prev:
+            bonus_map[item] = bonus_val
+
+    return bonus_map
 
         bonus_map = {}
         for c in data:
@@ -830,6 +907,4 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
-
-
 
