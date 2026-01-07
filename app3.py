@@ -415,113 +415,57 @@ def fetch_24h_volume(item_code):
 
 
 @st.cache_data
-def get_country_production_bonus_map(headers=None):
-    """Devuelve un diccionario {itemCode: max_production_bonus_fraction}.
-    Maneja respuestas no-json y detecta si el bonus ya viene en fracción o en porciento.
+def get_country_production_bonus_map():
+    """
+    Devuelve un dict { itemCode: max_bonus_fraction }
+    Ej: { "iron": 0.12, "grain": 0.08 }
     """
     url = "https://api2.warera.io/trpc/country.getAllCountries"
-    params = {"batch": "1", "input": "{}"}
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-    except Exception as e:
-        st.warning(f"Error realizando request a country.getAllCountries: {e}")
-        return {}
-
-    if r.status_code != 200:
-        st.warning(f"Error en respuesta HTTP countries: {r.status_code} - {r.text[:200]}")
-        return {}
-
-    if not r.text or not r.text.strip():
-        st.warning("Respuesta vacía al solicitar country bonuses.")
-        return {}
-
-    try:
-        parsed = r.json()
-    except Exception as e:
-        st.warning(f"Error parseando JSON de countries: {e} - response snippet: {r.text[:500]}")
-        return {}
-
-    data = None
-    if isinstance(parsed, list) and parsed:
-        data = parsed[0].get('result', {}).get('data')
-    elif isinstance(parsed, dict):
-        data = parsed.get('result', {}).get('data')
-    if not data:
-        st.warning('No se encontró data en country.getAllCountries response')
-        return {}
-
     bonus_map = {}
-    for c in data:
-        item = c.get('specializedItem')
-        if not item:
-            continue
 
-        bonus = None
-        # varios caminos posibles en la respuesta
-        try:
-            bonus = c.get('rankings', {}).get('countryProductionBonus', {}).get('value')
-        except Exception:
-            bonus = None
-        if bonus is None:
-            bonus = c.get('strategicResources', {}).get('bonuses', {}).get('productionPercent')
-        if bonus is None:
-            cpb = c.get('countryProductionBonus')
-            if isinstance(cpb, dict):
-                bonus = cpb.get('value')
-            elif isinstance(cpb, (int, float)):
-                bonus = cpb
+    try:
+        r = requests.get(url, timeout=15)
 
-        if bonus is None:
-            continue
+        if r.status_code != 200 or not r.text:
+            st.warning(f"country.getAllCountries HTTP {r.status_code}")
+            return bonus_map
 
-        # Detectar si el valor está en porcentaje (ej 5) o fracción (0.05)
-        try:
-            bonus_val = float(bonus)
-        except Exception:
-            continue
-        if bonus_val > 1.0:
-            bonus_val = bonus_val / 100.0
+        data = r.json()
+        countries = data[0]["result"]["data"]["items"]
 
-        prev = bonus_map.get(item)
-        if prev is None or bonus_val > prev:
-            bonus_map[item] = bonus_val
-
-    return bonus_map
-
-        bonus_map = {}
-        for c in data:
-            item = c.get('specializedItem')
+        for c in countries:
+            item = c.get("specializedItem")
             if not item:
                 continue
-            # intentar distintas fuentes de bonus
-            bonus = None
+
+            bonus_val = None
+
+            # Caso más común (rankings)
             try:
-                bonus = c.get('rankings', {}).get('countryProductionBonus', {}).get('value')
+                bonus_val = c["rankings"]["countryProductionBonus"]["value"]
             except Exception:
-                bonus = None
-            if bonus is None:
-                # fallback a estructura estratégica
-                bonus = c.get('strategicResources', {}).get('bonuses', {}).get('productionPercent')
-            if bonus is None:
-                # otro posible campo
-                cpb = c.get('countryProductionBonus')
-                if isinstance(cpb, dict):
-                    bonus = cpb.get('value')
-                elif isinstance(cpb, (int, float)):
-                    bonus = cpb
-            if bonus is None:
+                pass
+
+            # Fallbacks posibles
+            if bonus_val is None:
+                bonus_val = (
+                    c.get("countryProductionBonus", {})
+                     .get("value")
+                )
+
+            if bonus_val is None:
                 continue
-            try:
-                bonus_val = float(bonus) / 100.0
-            except Exception:
-                continue
-            prev = bonus_map.get(item)
-            if prev is None or bonus_val > prev:
-                bonus_map[item] = bonus_val
-        return bonus_map
+
+            bonus_val = float(bonus_val)
+            if bonus_val > 1:
+                bonus_val = bonus_val / 100.0
+
+            bonus_map[item] = max(bonus_map.get(item, 0), bonus_val)
+
     except Exception as e:
-        st.warning(f"No se pudo obtener country bonuses: {e}")
-        return {}
+        st.error(f"Error leyendo country bonuses: {e}")
+
+    return bonus_map
 
 # Función para calcular máximos costos por PP para todos los recursos
 def calculate_max_pp_costs(country_bonus_map, default_production_bonus):
