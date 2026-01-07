@@ -208,7 +208,9 @@ def analyze_employees_with_real_costs(user_id, country_bonus_map, default_produc
         market_price = market_prices.get(resource, 0)
 
         # obtener bonus para este recurso (fracción), fallback al default
-        resource_bonus = country_bonus_map.get(resource, default_production_bonus)
+        bonus_entry = country_bonus_map.get(resource)
+        resource_bonus = bonus_entry["bonus"] if bonus_entry else default_production_bonus
+        best_country = bonus_entry["country"] if bonus_entry else None
 
         workers = company.get('workers', [])
         for worker in workers:
@@ -460,8 +462,14 @@ def get_country_production_bonus_map():
             if bonus_val > 1:
                 bonus_val = bonus_val / 100.0
 
-            bonus_map[item] = max(bonus_map.get(item, 0), bonus_val)
-
+            country_name = c.get("name", "Unknown")
+            
+            current = bonus_map.get(item)
+            if not current or bonus_val > current["bonus"]:
+                bonus_map[item] = {
+                    "bonus": bonus_val,
+                    "country": country_name
+                }
     except Exception as e:
         st.error(f"Error leyendo country bonuses: {e}")
 
@@ -482,8 +490,10 @@ def calculate_max_pp_costs(country_bonus_map, default_production_bonus):
         if resource not in market_prices:
             continue
         market_price = market_prices[resource]
-        resource_bonus = country_bonus_map.get(resource, default_production_bonus)
-
+        bonus_entry = country_bonus_map.get(resource)
+        resource_bonus = bonus_entry["bonus"] if bonus_entry else default_production_bonus
+        best_country = bonus_entry["country"] if bonus_entry else None
+        
         max_cost_no_deposit = calculate_max_pp_cost(resource, resource_bonus, market_prices, False)
         max_cost_with_deposit = None
         if resource in RAW_MATERIALS:
@@ -495,7 +505,8 @@ def calculate_max_pp_costs(country_bonus_map, default_production_bonus):
             "max_cost_no_deposit": max_cost_no_deposit,
             "max_cost_with_deposit": max_cost_with_deposit,
             "is_raw_material": resource in RAW_MATERIALS,
-            "resource_bonus": resource_bonus
+            "resource_bonus": resource_bonus,
+            "best_country": best_country
         })
     return results
 
@@ -753,11 +764,15 @@ with tab3:
             display_max_costs_df['market_price'] = display_max_costs_df['market_price'].apply(lambda x: f"{x:.4f}")
             display_max_costs_df['max_cost_no_deposit'] = display_max_costs_df['max_cost_no_deposit'].apply(lambda x: f"{x:.6f}" if x is not None else "N/A")
             display_max_costs_df['max_cost_with_deposit'] = display_max_costs_df['max_cost_with_deposit'].apply(lambda x: f"{x:.6f}" if x is not None else "N/A")
-            
+            display_max_costs_df['resource_bonus'] = display_max_costs_df['resource_bonus'].apply(lambda x: f"{x*100:.1f}%" if x is not None else "N/A")
             # Reordenar columnas
             display_max_costs_df = display_max_costs_df[[
-                'resource', 'is_raw_material', 'market_price', 
-                'max_cost_no_deposit', 'max_cost_with_deposit'
+                'resource',
+                'best_country',
+                'resource_bonus',
+                'market_price',
+                'max_cost_no_deposit',
+                'max_cost_with_deposit'
             ]]
             
             st.dataframe(
@@ -851,6 +866,7 @@ with tab4:
             st.markdown("- `bid_ask_spread` se obtiene a partir de las órdenes activas (bid/ask) y coincide con lo mostrado en Market Depth.")
     else:
         st.info("Haga clic en 'Analizar Arbitrage (24h)' en la barra lateral para cargar la tabla de recursos con volumen y precio.")
+
 
 
 
